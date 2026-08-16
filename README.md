@@ -432,6 +432,29 @@ To run tests with coverage:
 go test -cover ./...
 ```
 
+### Running integration tests
+
+The integration fixture uses Docker Compose and OpenBao 2.6. OpenBao starts
+with a static test-only auto-unseal key and uses declarative self-initialization
+to mount KV v1/v2, seed secrets, and create a read-only AppRole. No root token
+or manual bootstrap commands are required.
+
+```bash
+./integration/test.sh
+```
+
+The script starts a disposable OpenBao instance, tests AppRole authentication,
+environment/file/template injection, masking, and credential stripping, then
+removes the container and its storage volume. Set `OPENBAO_PORT` if port 8200
+is already in use:
+
+```bash
+OPENBAO_PORT=18200 ./integration/test.sh
+```
+
+The credentials in `compose.yaml` are public fixtures for local and CI testing
+only. They must never be used in a persistent or production environment.
+
 ### Building for all platforms
 
 The project uses GitHub Actions to build binaries for multiple platforms. You can build them locally using:
