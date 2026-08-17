@@ -30,9 +30,7 @@ jobs:
           install-mode: goinstall
 
       - name: gosec security checker
-        uses: securego/gosec@master
-        with:
-          args: ./...
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 ./...
 
   # ── Test ─────────────────────────────────────────────────────────────────────
   test:
