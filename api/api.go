@@ -247,7 +247,9 @@ func (c *Client) doWithContext(ctx context.Context, method, path string, body []
 	if err != nil {
 		return nil, fmt.Errorf("api: %s %s: %w", method, path, err)
 	}
-	defer res.Body.Close()
+	defer func() {
+		_ = res.Body.Close()
+	}()
 
 	resBody, err := io.ReadAll(res.Body)
 	if err != nil {

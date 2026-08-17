@@ -197,8 +197,14 @@ func TestRetry_NetworkErrorRetried(t *testing.T) {
 				t.Error("ResponseWriter does not support Hijacker")
 				return
 			}
-			conn, _, _ := hj.Hijack()
-			conn.Close()
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Errorf("hijack connection: %v", err)
+				return
+			}
+			if err := conn.Close(); err != nil {
+				t.Errorf("close hijacked connection: %v", err)
+			}
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

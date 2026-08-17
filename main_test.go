@@ -9,8 +9,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
-	"math/big"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,8 +47,11 @@ func TestRunVersion_Output(t *testing.T) {
 
 	code := run([]string{"version"})
 
-	w.Close()
+	closeErr := w.Close()
 	os.Stdout = origStdout
+	if closeErr != nil {
+		t.Fatalf("close captured stdout: %v", closeErr)
+	}
 
 	outBytes, err := io.ReadAll(r)
 	if err != nil {
