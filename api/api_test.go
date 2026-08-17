@@ -149,6 +149,64 @@ func TestLoginAppRole_HTTPError(t *testing.T) {
 	}
 }
 
+func TestClientRejectsRedirects(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		request    func(*api.Client) error
+	}{
+		{
+			name:       "token header on 302",
+			statusCode: http.StatusFound,
+			request: func(c *api.Client) error {
+				c.SetToken("hvs.test-token")
+				_, err := c.ReadSecret("kv/test", "value", 2)
+				return err
+			},
+		},
+		{
+			name:       "JWT body on 307",
+			statusCode: http.StatusTemporaryRedirect,
+			request: func(c *api.Client) error {
+				return c.LoginJWT("test-role", "test-jwt")
+			},
+		},
+		{
+			name:       "AppRole body on 308",
+			statusCode: http.StatusPermanentRedirect,
+			request: func(c *api.Client) error {
+				return c.LoginAppRole("test-role-id", "test-secret-id")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			redirected := make(chan struct{}, 1)
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				redirected <- struct{}{}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer target.Close()
+
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL+"/collect", tt.statusCode)
+			}))
+			defer source.Close()
+
+			if err := tt.request(api.New(source.URL, "")); err == nil {
+				t.Fatalf("expected redirect status %d to be rejected", tt.statusCode)
+			}
+
+			select {
+			case <-redirected:
+				t.Fatal("redirect target received a request containing credentials")
+			default:
+			}
+		})
+	}
+}
+
 // --- Namespace header ---
 
 func TestNamespaceHeader(t *testing.T) {
