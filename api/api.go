@@ -42,6 +42,11 @@ func NewWithTransport(addr, namespace string, base http.RoundTripper) *Client {
 		http: &http.Client{
 			Timeout:   httpTimeout,
 			Transport: newRetryTransport(base),
+			// Vault requests contain credentials in custom headers and request
+			// bodies. Do not forward them to a redirect target.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		ctx: context.Background(),
 	}
