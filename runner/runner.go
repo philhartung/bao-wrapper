@@ -46,11 +46,17 @@ func Run(args []string, secrets []SecretValue, revoker Revoker, secretPrefix str
 	if err != nil {
 		return 1, fmt.Errorf("runner: create temp dir: %w", err)
 	}
+	tmpRoot, err := os.OpenRoot(tmpDir)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return 1, fmt.Errorf("runner: open temp dir: %w", err)
+	}
 
 	cleanup := func() {
 		if revoker != nil {
 			_ = revoker.RevokeToken()
 		}
+		_ = tmpRoot.Close()
 		_ = os.RemoveAll(tmpDir)
 	}
 
@@ -68,34 +74,31 @@ func Run(args []string, secrets []SecretValue, revoker Revoker, secretPrefix str
 
 		switch sv.Ref.Type {
 		case parser.TypeFile:
-			// If outfile is set, write directly to that path instead of the temp dir.
+			// If outfile is set, atomically replace it instead of writing directly
+			// through a potentially attacker-controlled path.
 			var path string
-			var flags int
 			if outfile := sv.Ref.Args["outfile"]; outfile != "" {
-				if err := os.MkdirAll(filepath.Dir(outfile), 0750); err != nil {
-					cleanup()
-					return 1, fmt.Errorf("runner: create outfile dir: %w", err)
-				}
 				path = outfile
-				flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+				if err := writeSecretFile(path, sv.Value); err != nil {
+					cleanup()
+					return 1, fmt.Errorf("runner: create secret file: %w", err)
+				}
 			} else {
 				path = filepath.Join(tmpDir, sv.Ref.EnvName)
-				flags = os.O_CREATE | os.O_EXCL | os.O_WRONLY
-			}
-			// #nosec G304 -- path is either Join(MkdirTemp dir, validated env-var name) or a user-specified outfile
-			f, err := os.OpenFile(path, flags, 0600)
-			if err != nil {
-				cleanup()
-				return 1, fmt.Errorf("runner: create secret file: %w", err)
-			}
-			if _, err := f.WriteString(sv.Value); err != nil {
-				_ = f.Close()
-				cleanup()
-				return 1, fmt.Errorf("runner: write secret file: %w", err)
-			}
-			if err := f.Close(); err != nil {
-				cleanup()
-				return 1, fmt.Errorf("runner: close secret file: %w", err)
+				f, err := tmpRoot.OpenFile(sv.Ref.EnvName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+				if err != nil {
+					cleanup()
+					return 1, fmt.Errorf("runner: create secret file: %w", err)
+				}
+				if _, err := f.WriteString(sv.Value); err != nil {
+					_ = f.Close()
+					cleanup()
+					return 1, fmt.Errorf("runner: write secret file: %w", err)
+				}
+				if err := f.Close(); err != nil {
+					cleanup()
+					return 1, fmt.Errorf("runner: close secret file: %w", err)
+				}
 			}
 			extraEnv = append(extraEnv, sv.Ref.EnvName+"="+path)
 
