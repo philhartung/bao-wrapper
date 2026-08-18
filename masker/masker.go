@@ -5,6 +5,7 @@ package masker
 import (
 	"bytes"
 	"io"
+	"sort"
 	"sync"
 )
 
@@ -22,10 +23,13 @@ type Writer struct {
 	mu      sync.Mutex
 	dst     io.Writer
 	secrets [][]byte
-	// overlap holds up to (maxLen-1) bytes from the end of the previous
-	// write so that secrets split across chunk boundaries are detected.
-	overlap []byte
-	maxLen  int
+	// pending holds up to (maxLen-1) raw bytes whose masking cannot be
+	// decided until more input arrives.
+	pending []byte
+	// maskRemaining is the number of leading pending bytes already covered
+	// by a mask marker emitted for an overlapping secret span.
+	maskRemaining int
+	maxLen        int
 }
 
 // New creates a Writer that writes masked output to dst.
@@ -40,39 +44,27 @@ func New(dst io.Writer, secrets []string) *Writer {
 			}
 		}
 	}
+	w.sortSecrets()
 	return w
 }
 
 // Write implements io.Writer. It buffers up to (maxLen-1) bytes at the end
 // of each write to ensure secrets are not split across chunk boundaries.
 func (w *Writer) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	if len(w.secrets) == 0 {
 		return w.dst.Write(p)
 	}
 
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	combined := append(w.pending, p...)
+	out, consumed, maskRemaining := w.process(combined, false)
+	w.pending = bytes.Clone(combined[consumed:])
+	w.maskRemaining = maskRemaining
 
-	// Combine leftover overlap with new data.
-	combined := append(w.overlap, p...)
-
-	// Replace all known secrets in combined.
-	out := replaceAll(combined, w.secrets)
-
-	// Keep up to (maxLen-1) bytes at the end as the new overlap so that
-	// a secret that begins near the end of this chunk can still be detected
-	// when the next chunk arrives.
-	overlapLen := w.maxLen - 1
-	if overlapLen > len(out) {
-		overlapLen = len(out)
-	}
-
-	toWrite := out[:len(out)-overlapLen]
-	w.overlap = make([]byte, overlapLen)
-	copy(w.overlap, out[len(out)-overlapLen:])
-
-	if len(toWrite) > 0 {
-		if _, err := w.dst.Write(toWrite); err != nil {
+	if len(out) > 0 {
+		if _, err := w.dst.Write(out); err != nil {
 			return 0, err
 		}
 	}
@@ -86,11 +78,12 @@ func (w *Writer) Flush() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if len(w.overlap) == 0 {
+	if len(w.pending) == 0 {
 		return nil
 	}
-	out := replaceAll(w.overlap, w.secrets)
-	w.overlap = nil
+	out, _, _ := w.process(w.pending, true)
+	w.pending = nil
+	w.maskRemaining = 0
 	_, err := w.dst.Write(out)
 	return err
 }
@@ -104,15 +97,55 @@ func (w *Writer) AddSecret(s string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.secrets = append(w.secrets, []byte(s))
+	w.sortSecrets()
 	if len(s) > w.maxLen {
 		w.maxLen = len(s)
 	}
 }
 
-// replaceAll replaces all occurrences of each secret in data.
-func replaceAll(data []byte, secrets [][]byte) []byte {
-	for _, secret := range secrets {
-		data = bytes.ReplaceAll(data, secret, []byte(masked))
+// process masks the decidable prefix of data. When final is false, it retains
+// enough raw input to detect secrets split across future writes. It checks
+// positions inside an existing masked span so that overlapping matches can
+// extend the span without exposing either secret.
+func (w *Writer) process(data []byte, final bool) ([]byte, int, int) {
+	out := make([]byte, 0, len(data))
+	pos := 0
+	maskedUntil := w.maskRemaining
+
+	for pos < len(data) {
+		if !final && len(data)-pos < w.maxLen {
+			break
+		}
+
+		wasCovered := pos < maskedUntil
+		for _, secret := range w.secrets {
+			if bytes.HasPrefix(data[pos:], secret) {
+				if end := pos + len(secret); end > maskedUntil {
+					maskedUntil = end
+				}
+				break
+			}
+		}
+
+		if pos < maskedUntil {
+			if !wasCovered {
+				out = append(out, masked...)
+			}
+		} else {
+			out = append(out, data[pos])
+		}
+		pos++
 	}
-	return data
+
+	remaining := maskedUntil - pos
+	if remaining < 0 {
+		remaining = 0
+	}
+	return out, pos, remaining
+}
+
+func (w *Writer) sortSecrets() {
+	sort.SliceStable(w.secrets, func(i, j int) bool {
+		return len(w.secrets[i]) > len(w.secrets[j])
+	})
 }
