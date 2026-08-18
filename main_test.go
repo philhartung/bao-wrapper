@@ -34,7 +34,7 @@ func TestRunVersion_Output(t *testing.T) {
 	// Temporarily override the package-level variables to verify output format.
 	origVersion, origCommit := version, commit
 	version = "v1.2.3"
-	commit = "abc1234"
+	commit = "0123456789abcdef0123456789abcdef01234567"
 	defer func() { version, commit = origVersion, origCommit }()
 
 	// Capture stdout by redirecting os.Stdout.
@@ -65,8 +65,8 @@ func TestRunVersion_Output(t *testing.T) {
 	if !strings.Contains(output, "v1.2.3") {
 		t.Errorf("expected output to contain version %q, got %q", "v1.2.3", output)
 	}
-	if !strings.Contains(output, "abc1234") {
-		t.Errorf("expected output to contain commit %q, got %q", "abc1234", output)
+	if !strings.Contains(output, "0123456789abcdef0123456789abcdef01234567") {
+		t.Errorf("expected output to contain full commit %q, got %q", "0123456789abcdef0123456789abcdef01234567", output)
 	}
 }
 

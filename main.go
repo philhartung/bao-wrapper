@@ -21,7 +21,7 @@ import (
 // version and commit are set at build time via -ldflags:
 //
 //	go build -ldflags "-X main.version=$(git describe --tags --always) \
-//	                   -X main.commit=$(git rev-parse --short HEAD)" .
+//	                   -X main.commit=$(git rev-parse HEAD)" .
 var version = "dev"
 var commit = "none"
 
