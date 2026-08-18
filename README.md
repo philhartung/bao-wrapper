@@ -161,8 +161,10 @@ All components except `path` are optional and fall back to defaults. When no del
 | Engine | API path used | Description |
 |---|---|---|
 | `kv` (default) | `GET /v1/<mount>/data/<secret_path>` (KV v2) | KV v2 secrets. The path includes the mount point; `/data/` is inserted automatically. Example: path `kv/test` → `/v1/kv/data/test` |
-| `legacy` | `GET /v1/<path>` (KV v1) | KV v1 path style. The path is used as-is. Example: path `kvv1/test` → `/v1/kvv1/test` |
+| `legacy` | `GET /v1/<path>` (KV v1) | KV v1 path style. The path is used as-is after validation. Example: path `kvv1/test` → `/v1/kvv1/test` |
 | `template` | *(fetches template from KV v2, then renders)* | Fetches a Go `text/template` from a KV v2 path, renders it with `{{ secret "..." }}` support (see [Template engine](#template-engine)) |
+
+> **Legacy path restrictions:** `legacy` accepts only canonical relative paths. Paths below OpenBao's reserved `auth/`, `sys/`, `identity/`, and `cubbyhole/` prefixes are rejected because these are system endpoints, not KV v1 mounts. This restriction also applies to `legacy://` references used inside templates.
 
 The child process receives the bare name without the prefix.
 
@@ -436,6 +438,7 @@ flowchart TD
 - The Vault token is revoked via `POST /v1/auth/token/revoke-self` on exit.
 - Short strings (≤ 3 chars) are not masked to prevent over-masking.
 - In-template URLs forbid the `template` engine to prevent recursive template rendering.
+- Legacy KV v1 lookups cannot access OpenBao's reserved `auth/`, `sys/`, `identity/`, or `cubbyhole/` endpoint prefixes.
 - Secret prefix variables (default `SECRET_*`) with unrecognised engine schemes are silently skipped.
 
 ---
