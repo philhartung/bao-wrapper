@@ -61,12 +61,13 @@ func Run(args []string, secrets []SecretValue, revoker Revoker, secretPrefix str
 	}
 
 	// Build the extra environment entries and collect plaintext values for masking.
+	// A rendered template's outer value is injected but deliberately excluded:
+	// its separately registered inner secrets are masked while its static
+	// skeleton remains visible in logs.
 	var extraEnv []string
-	var secretValues []string
+	secretValues := valuesForMasking(secrets)
 
 	for _, sv := range secrets {
-		secretValues = append(secretValues, sv.Value)
-
 		// Entries with empty EnvName are masking-only (e.g. inner template secrets).
 		if sv.Ref.EnvName == "" {
 			continue
@@ -155,6 +156,19 @@ func Run(args []string, secrets []SecretValue, revoker Revoker, secretPrefix str
 		exitCode = 1
 	}
 	return exitCode, nil
+}
+
+// valuesForMasking selects plaintext values that should be registered with
+// the output masker. Rendered template output is excluded so only the inner
+// secrets registered as masking-only entries hide parts of the template.
+func valuesForMasking(secrets []SecretValue) []string {
+	values := make([]string, 0, len(secrets))
+	for _, secret := range secrets {
+		if secret.Ref.Engine != "template" {
+			values = append(values, secret.Value)
+		}
+	}
+	return values
 }
 
 // SecretValuesToStrings extracts just the value strings from a slice.

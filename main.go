@@ -121,9 +121,11 @@ func run(args []string) int {
 	//   1. BAO_TOKEN / VAULT_TOKEN  – direct token, no login required
 	//   2. BAO_JWT_ROLE + JWT       – JWT/OIDC login (GitHub Actions OIDC auto-detected)
 	//   3. BAO_APP_ID + BAO_APP_SECRET – AppRole login
+	tokenAcquired := false
 	switch {
 	case vaultToken != "":
 		client.SetToken(vaultToken)
+		tokenAcquired = true
 	case vaultRole != "":
 		if vaultJWT == "" {
 			jwt, err := fetchGitHubActionsOIDCToken(ctx)
@@ -138,12 +140,23 @@ func run(args []string) int {
 				fmt.Fprintln(os.Stderr, "error: vault login failed:", err)
 				return 1
 			}
+			tokenAcquired = true
 		}
 	case vaultRoleID != "" && vaultSecretID != "":
 		if err := client.LoginAppRole(vaultRoleID, vaultSecretID); err != nil {
 			fmt.Fprintln(os.Stderr, "error: vault approle login failed:", err)
 			return 1
 		}
+		tokenAcquired = true
+	}
+
+	// The CLI owns the authenticated token lifecycle. Register cleanup before
+	// parsing or fetching secrets so failures before child startup revoke the
+	// token too. RevokeToken supplies a fresh timeout context after signals.
+	if tokenAcquired {
+		defer func() {
+			_ = client.RevokeToken()
+		}()
 	}
 
 	// Parse secret variables using the configured prefix.
@@ -181,7 +194,9 @@ func run(args []string) int {
 		secretValues = append(secretValues, runner.SecretValue{Ref: ref, Value: val})
 	}
 
-	exitCode, err := runner.Run(cmdArgs, secretValues, client, secretPrefix)
+	// main owns token revocation; runner still accepts a Revoker for callers
+	// that use the package directly, but passing nil prevents duplicate calls.
+	exitCode, err := runner.Run(cmdArgs, secretValues, nil, secretPrefix)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 	}

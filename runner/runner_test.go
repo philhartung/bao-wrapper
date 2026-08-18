@@ -3,7 +3,37 @@ package runner
 import (
 	"strings"
 	"testing"
+
+	"github.com/philhartung/bao-wrapper/parser"
 )
+
+func TestValuesForMaskingSkipsRenderedTemplate(t *testing.T) {
+	secrets := []SecretValue{
+		{
+			Ref:   parser.SecretRef{Engine: "kv", EnvName: "PASSWORD"},
+			Value: "ordinary-secret",
+		},
+		{
+			Ref:   parser.SecretRef{Engine: "template", EnvName: "CONFIG"},
+			Value: "password=inner-secret",
+		},
+		{
+			Ref:   parser.SecretRef{EnvName: ""},
+			Value: "inner-secret",
+		},
+	}
+
+	got := valuesForMasking(secrets)
+	want := []string{"ordinary-secret", "inner-secret"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d masking values, got %d: %v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("masking value %d: expected %q, got %q", i, want[i], got[i])
+		}
+	}
+}
 
 func TestFilteredEnv_RemovesSensitivePrefixes(t *testing.T) {
 	cases := []struct {

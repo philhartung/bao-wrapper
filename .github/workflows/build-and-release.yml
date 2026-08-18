@@ -49,13 +49,12 @@ jobs:
       - name: Run tests
         run: go test -v -race -cover ./...
 
-  # Run the OpenBao integration fixture for pull requests and release tags.
-  # Keeping this job here also allows it to gate release publication.
+  # Run the OpenBao integration fixture for every workflow event and use it to
+  # gate release publication.
   integration:
     name: OpenBao Integration
     runs-on: ubuntu-24.04
     needs: [lint, test]
-    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
     timeout-minutes: 10
     permissions:
       contents: read
