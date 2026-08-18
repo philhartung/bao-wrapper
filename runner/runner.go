@@ -184,14 +184,18 @@ var fixedSensitiveEnvPrefixes = []string{
 // ACTIONS_ID_TOKEN_REQUEST_* values from being inherited by the child.
 func filteredEnv(secretPrefix string) []string {
 	sensitiveEnvPrefixes := make([]string, len(fixedSensitiveEnvPrefixes)+1)
-	copy(sensitiveEnvPrefixes, fixedSensitiveEnvPrefixes)
-	sensitiveEnvPrefixes[len(fixedSensitiveEnvPrefixes)] = secretPrefix
+	for i, prefix := range fixedSensitiveEnvPrefixes {
+		sensitiveEnvPrefixes[i] = strings.ToUpper(prefix)
+	}
+	sensitiveEnvPrefixes[len(fixedSensitiveEnvPrefixes)] = strings.ToUpper(secretPrefix)
 	parent := os.Environ()
 	out := make([]string, 0, len(parent))
 	for _, e := range parent {
+		key, _, _ := strings.Cut(e, "=")
+		key = strings.ToUpper(key)
 		skip := false
 		for _, prefix := range sensitiveEnvPrefixes {
-			if strings.HasPrefix(e, prefix) {
+			if strings.HasPrefix(key, prefix) {
 				skip = true
 				break
 			}
