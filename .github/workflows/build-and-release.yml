@@ -12,19 +12,19 @@ jobs:
   # ── Lint & Security ──────────────────────────────────────────────────────────
   lint:
     name: Lint & Security
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.26.6"
           cache: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2
           install-mode: goinstall
@@ -35,13 +35,13 @@ jobs:
   # ── Test ─────────────────────────────────────────────────────────────────────
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.26.6"
           cache: true
@@ -53,7 +53,7 @@ jobs:
   # Keeping this job here also allows it to gate release publication.
   integration:
     name: OpenBao Integration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [lint, test]
     if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
     timeout-minutes: 10
@@ -61,9 +61,9 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.26.6"
           cache: true
@@ -74,7 +74,7 @@ jobs:
   # ── Build ─────────────────────────────────────────────────────────────────────
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [lint, test]
     permissions:
       contents: read
@@ -93,11 +93,11 @@ jobs:
             goarch: arm64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.26.6"
           cache: true
@@ -119,13 +119,13 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
-          COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "none")
-          go build -trimpath \
+          COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "none")
+          go build -trimpath -buildvcs=false -mod=readonly \
             -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
             -o "${{ steps.bin.outputs.name }}" .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.bin.outputs.name }}
           path: ${{ steps.bin.outputs.name }}
@@ -134,24 +134,34 @@ jobs:
   # ── Release ───────────────────────────────────────────────────────────────────
   release:
     name: Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [build, integration]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
+      attestations: write
       contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist/
           merge-multiple: true
 
+      - name: Generate checksum manifest
+        run: sha256sum dist/* | sed 's#dist/##' > dist/SHA256SUMS
+
+      - name: Attest release binaries and checksum manifest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: dist/*
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/*
           generate_release_notes: true

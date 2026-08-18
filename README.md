@@ -7,6 +7,7 @@ It fetches secrets at runtime, injects them into the child process's environment
 
 - [Key features](#key-features)
 - [Installation](#installation)
+  - [Verify release provenance](#verify-release-provenance)
 - [Quick Start](#quick-start)
 - [Usage](#usage)
   - [Environment variables](#environment-variables)
@@ -42,9 +43,12 @@ It fetches secrets at runtime, injects them into the child process's environment
 ### Download from GitHub Releases
 
 ```bash
-# Linux amd64
-curl -fsSL https://github.com/philhartung/bao-wrapper/releases/latest/download/bao-wrapper-linux-amd64 \
-  -o bao-wrapper && chmod +x bao-wrapper
+# Linux amd64; update both values deliberately when upgrading.
+BAO_WRAPPER_VERSION=v0.1.1
+BAO_WRAPPER_SHA256=60d55e0c4541bf909bcff3b9db97b2d48fb16464f87ed8368294fbec815453bd
+curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64"
+printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper-linux-amd64 | sha256sum --check --strict
+install -m 0755 bao-wrapper-linux-amd64 bao-wrapper
 ```
 
 Available release assets:
@@ -56,6 +60,25 @@ Available release assets:
 | macOS amd64 | `bao-wrapper-darwin-amd64` |
 | macOS arm64 (M-series) | `bao-wrapper-darwin-arm64` |
 | Windows amd64 | `bao-wrapper-windows-amd64.exe` |
+
+New releases also contain `SHA256SUMS`. The manifest and every binary have a GitHub build-provenance attestation tied to this repository's release workflow.
+
+### Verify release provenance
+
+For releases containing `SHA256SUMS`, download the manifest and selected binary from an explicit version, authenticate both with the [GitHub CLI](https://cli.github.com/), and only then install the binary:
+
+```bash
+BAO_WRAPPER_VERSION=vX.Y.Z # replace with the exact release being installed
+curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/SHA256SUMS"
+curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64"
+
+gh attestation verify SHA256SUMS --repo philhartung/bao-wrapper
+gh attestation verify bao-wrapper-linux-amd64 --repo philhartung/bao-wrapper
+sha256sum --check --ignore-missing --strict SHA256SUMS
+install -m 0755 bao-wrapper-linux-amd64 bao-wrapper
+```
+
+The attestation verifies the artifact's signed provenance; `SHA256SUMS` makes the release's complete digest set easy to inspect and use in systems that require a pinned checksum.
 
 ### Build from source
 
@@ -287,9 +310,12 @@ build:
     SECRET_DOCKER_CFG: "template://tpl:file@kv/ci/docker-config?outfile=.docker/config.json"
   before_script:
     - |
+      BAO_WRAPPER_VERSION=v0.1.1
+      BAO_WRAPPER_SHA256=60d55e0c4541bf909bcff3b9db97b2d48fb16464f87ed8368294fbec815453bd
       curl -fsSL \
-        https://github.com/philhartung/bao-wrapper/releases/latest/download/bao-wrapper-linux-amd64 \
+        "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
         -o /usr/local/bin/bao-wrapper
+      printf '%s  %s\n' "$BAO_WRAPPER_SHA256" /usr/local/bin/bao-wrapper | sha256sum --check --strict
       chmod +x /usr/local/bin/bao-wrapper
   script:
     - bao-wrapper run -- npm run build
@@ -315,7 +341,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       BAO_ADDR: "https://vault.example.com"
       BAO_NAMESPACE: "mynamespace"
@@ -323,14 +349,17 @@ jobs:
       # Inject the NPM token as an env var
       SECRET_NPM_TOKEN: "kv://npmToken:env@kv/frontend/ci"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install bao-wrapper
         run: |
+          BAO_WRAPPER_VERSION=v0.1.1
+          BAO_WRAPPER_SHA256=60d55e0c4541bf909bcff3b9db97b2d48fb16464f87ed8368294fbec815453bd
           curl -fsSL \
-            https://github.com/philhartung/bao-wrapper/releases/latest/download/bao-wrapper-linux-amd64 \
-            -o /usr/local/bin/bao-wrapper
-          chmod +x /usr/local/bin/bao-wrapper
+            "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
+            -o bao-wrapper
+          printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper | sha256sum --check --strict
+          sudo install -m 0755 bao-wrapper /usr/local/bin/bao-wrapper
 
       - name: Build
         run: bao-wrapper run -- npm run build
@@ -415,7 +444,7 @@ flowchart TD
 
 ### Prerequisites
 
-- [Go](https://go.dev/dl/) 1.22+
+- [Go](https://go.dev/dl/) 1.26.6 (the version pinned by `go.mod` and the release workflow)
 - Access to an OpenBao or HashiCorp Vault instance (for integration testing)
 
 ### Running tests
@@ -471,3 +500,24 @@ GOOS=darwin GOARCH=arm64 go build -o bao-wrapper-darwin-arm64 .
 # Windows
 GOOS=windows GOARCH=amd64 go build -o bao-wrapper-windows-amd64.exe .
 ```
+
+### Reproducing a release build
+
+Release builds use the Go version declared in `go.mod`, disable CGO and automatic VCS stamping, remove local paths, and embed the exact tag and full 40-character source commit. To reproduce one asset, start from a clean checkout of its tag and use the same target and flags:
+
+```bash
+VERSION=vX.Y.Z
+git clone https://github.com/philhartung/bao-wrapper.git
+cd bao-wrapper
+git checkout --detach "$VERSION"
+COMMIT=$(git rev-parse HEAD)
+test "$(git describe --tags --exact-match)" = "$VERSION"
+
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -buildvcs=false -mod=readonly \
+  -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+  -o bao-wrapper-linux-amd64 .
+sha256sum bao-wrapper-linux-amd64
+```
+
+Compare the result with the attested `SHA256SUMS` entry. Reproduction requires the exact Go toolchain version and target architecture used by the workflow. Repository administrators should also enable GitHub's immutable-releases setting so a published tag and its assets cannot be altered; that repository-level policy cannot be enabled from this workflow file.
