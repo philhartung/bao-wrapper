@@ -7,10 +7,10 @@ import (
 
 func TestFilteredEnv_RemovesSensitivePrefixes(t *testing.T) {
 	cases := []struct {
-		name    string
-		key     string
-		value   string
-		wantIn  bool
+		name   string
+		key    string
+		value  string
+		wantIn bool
 	}{
 		{"BAO_ prefix removed", "BAO_JWT_TOKEN", "secret-token", false},
 		{"BAO_APP_SECRET removed", "BAO_APP_SECRET", "my-secret-id", false},
@@ -18,9 +18,13 @@ func TestFilteredEnv_RemovesSensitivePrefixes(t *testing.T) {
 		{"BAO_ADDR removed", "BAO_ADDR", "https://bao.example.com", false},
 		{"VAULT_ prefix removed", "VAULT_JWT_TOKEN", "vault-token", false},
 		{"VAULT_ADDR removed", "VAULT_ADDR", "https://vault.example.com", false},
+		{"mixed-case VAULT_ prefix removed", "Vault_Token", "vault-token", false},
+		{"lowercase BAO_ prefix removed", "bao_app_secret", "my-secret-id", false},
 		{"SECRET_ prefix removed", "SECRET_DB_PASS", "kv://pass@app/db", false},
+		{"mixed-case custom prefix removed", "Secret_Db_Pass", "kv://pass@app/db", false},
 		{"ACTIONS_ID_TOKEN_REQUEST_ removed", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ghtoken", false},
 		{"ACTIONS_ID_TOKEN_REQUEST_URL removed", "ACTIONS_ID_TOKEN_REQUEST_URL", "https://token.actions.example.com", false},
+		{"lowercase ACTIONS_ID_TOKEN_REQUEST_ removed", "actions_id_token_request_token", "ghtoken", false},
 		{"Regular env var kept", "HOME", "/home/runner", true},
 		{"PATH kept", "PATH", "/usr/bin:/bin", true},
 		{"Unrelated var with BAO in value kept", "MY_VAR", "BAO_SOMETHING", true},
@@ -54,10 +58,10 @@ func TestFilteredEnv_RemovesSensitivePrefixes(t *testing.T) {
 func TestFilteredEnv_DoesNotContainSensitiveDefaults(t *testing.T) {
 	// Set a variety of sensitive variables and confirm none appear in the output.
 	sensitive := map[string]string{
-		"BAO_JWT_TOKEN":               "tok1",
-		"BAO_APP_SECRET":              "sid1",
-		"VAULT_TOKEN":                 "vtok",
-		"SECRET_MY_APP":               "kv://pass@path",
+		"BAO_JWT_TOKEN":                  "tok1",
+		"BAO_APP_SECRET":                 "sid1",
+		"VAULT_TOKEN":                    "vtok",
+		"SECRET_MY_APP":                  "kv://pass@path",
 		"ACTIONS_ID_TOKEN_REQUEST_TOKEN": "ghtoken",
 	}
 	for k, v := range sensitive {
