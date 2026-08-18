@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	pathpkg "path"
 	"strings"
 	"time"
 )
@@ -17,6 +18,13 @@ const (
 	httpTimeout    = 10 * time.Second
 	cleanupTimeout = 5 * time.Second
 )
+
+var reservedLegacyPathPrefixes = map[string]struct{}{
+	"auth":      {},
+	"cubbyhole": {},
+	"identity":  {},
+	"sys":       {},
+}
 
 // Client is a minimal Vault/OpenBao REST client.
 type Client struct {
@@ -125,12 +133,19 @@ func (c *Client) LoginAppRole(roleID, secretID string) error {
 // kvVersion must be 1 or 2. The path parameter contains the full Vault path
 // including the mount point (e.g. "kv/test" or "kvv1/test").
 // For KV v2, "/data/" is inserted after the first path segment (mount point).
-// For KV v1, the path is used as-is.
+// For KV v1, the path is used as-is after validation. OpenBao's reserved
+// auth, cubbyhole, identity, and sys path prefixes are not valid KV v1 mounts
+// and are rejected.
 // field is the key to extract from the secret data; if empty the entire data
 // map is JSON-encoded and returned.
 func (c *Client) ReadSecret(path, field string, kvVersion int) (string, error) {
+	if err := validateSecretPath(path, kvVersion); err != nil {
+		return "", err
+	}
+
 	var apiPath string
-	if kvVersion == 2 {
+	switch kvVersion {
+	case 2:
 		// Split path into mount and rest: "kv/test" → mount="kv", rest="test"
 		mount, rest, _ := strings.Cut(path, "/")
 		if rest != "" {
@@ -138,7 +153,7 @@ func (c *Client) ReadSecret(path, field string, kvVersion int) (string, error) {
 		} else {
 			apiPath = fmt.Sprintf("/v1/%s/data", mount)
 		}
-	} else {
+	case 1:
 		apiPath = fmt.Sprintf("/v1/%s", path)
 	}
 
@@ -192,6 +207,33 @@ func (c *Client) ReadSecret(path, field string, kvVersion int) (string, error) {
 		return strings.Trim(string(valRaw), `"`), nil
 	}
 	return val, nil
+}
+
+// validateSecretPath rejects paths whose interpretation could change between
+// bao-wrapper's URL parser, net/http, and OpenBao's request router. Legacy KV
+// v1 requests additionally cannot target OpenBao's reserved singleton mounts;
+// without this restriction, legacy would act as an authenticated generic GET
+// client and could expose the client token via auth/token/lookup-self.
+func validateSecretPath(secretPath string, kvVersion int) error {
+	if kvVersion != 1 && kvVersion != 2 {
+		return fmt.Errorf("api: unsupported KV version %d", kvVersion)
+	}
+
+	if secretPath == "" || strings.HasPrefix(secretPath, "/") {
+		return fmt.Errorf("api: secret path must be a non-empty relative path")
+	}
+	if strings.ContainsAny(secretPath, `\%?#`) || pathpkg.Clean(secretPath) != secretPath {
+		return fmt.Errorf("api: secret path must be canonical")
+	}
+
+	if kvVersion == 1 {
+		prefix, _, _ := strings.Cut(secretPath, "/")
+		if _, reserved := reservedLegacyPathPrefixes[strings.ToLower(prefix)]; reserved {
+			return fmt.Errorf("api: legacy secret path uses reserved OpenBao prefix %q", prefix)
+		}
+	}
+
+	return nil
 }
 
 // RevokeToken revokes the stored client token.

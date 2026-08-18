@@ -324,6 +324,81 @@ func TestReadSecret_KV1_Field(t *testing.T) {
 	}
 }
 
+func TestReadSecret_KV1_RejectsReservedAndNonCanonicalPaths(t *testing.T) {
+	requestReceived := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestReceived = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	tests := []string{
+		"",
+		"auth/token/lookup-self",
+		"AUTH/token/lookup-self",
+		"sys/internal/ui/resultant-acl",
+		"identity/entity/id/example",
+		"cubbyhole/response",
+		"/auth/token/lookup-self",
+		"auth//token/lookup-self",
+		"auth/./token/lookup-self",
+		"auth/token/../token/lookup-self",
+		`auth\token\lookup-self`,
+		"auth%2Ftoken%2Flookup-self",
+		"kvv1/path/",
+		"kvv1/path?query",
+		"kvv1/path#fragment",
+	}
+
+	for _, secretPath := range tests {
+		t.Run(secretPath, func(t *testing.T) {
+			requestReceived = false
+			c := api.New(srv.URL, "")
+			c.SetToken("tok")
+
+			if _, err := c.ReadSecret(secretPath, "id", 1); err == nil {
+				t.Fatal("ReadSecret succeeded, want validation error")
+			}
+			if requestReceived {
+				t.Fatal("ReadSecret sent a request for a rejected path")
+			}
+		})
+	}
+}
+
+func TestReadSecret_KV1_AllowsNonReservedPrefix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth-secrets/integration/token" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{"token": "kv1-secret"},
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	c := api.New(srv.URL, "")
+	val, err := c.ReadSecret("auth-secrets/integration/token", "token", 1)
+	if err != nil {
+		t.Fatalf("ReadSecret error: %v", err)
+	}
+	if val != "kv1-secret" {
+		t.Errorf("expected kv1-secret, got %s", val)
+	}
+}
+
+func TestReadSecret_RejectsUnsupportedKVVersion(t *testing.T) {
+	c := api.New("http://127.0.0.1", "")
+	for _, version := range []int{0, 3} {
+		if _, err := c.ReadSecret("kv/path", "field", version); err == nil {
+			t.Errorf("ReadSecret with KV version %d succeeded, want error", version)
+		}
+	}
+}
+
 func TestReadSecret_MissingField(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
