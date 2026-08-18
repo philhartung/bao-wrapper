@@ -47,8 +47,11 @@ initialize "secret_engines" {
     path      = "kv/data/integration/app"
     data = {
       data = {
-        password    = "integration-db-password-7c21"
-        certificate = "integration-certificate-material-4e98"
+        password          = "integration-db-password-7c21"
+        password_extended = "integration-db-password-7c21-extended-f84a"
+        certificate       = "integration-certificate-material-4e98"
+        retries           = 7
+        enabled           = true
       }
     }
   }
@@ -58,7 +61,11 @@ initialize "secret_engines" {
     path      = "kv/data/integration/template"
     data = {
       data = {
-        tpl = "database_password={{ secret \"kv://password@kv/integration/app\" }}"
+        tpl = <<EOT
+database_password={{ secret "kv://password@kv/integration/app" }}
+legacy_token={{ secret "legacy://token@kvv1/integration/legacy" }}
+mode=production
+EOT
       }
     }
   }

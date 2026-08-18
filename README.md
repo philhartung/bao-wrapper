@@ -475,10 +475,13 @@ or manual bootstrap commands are required.
 ./integration/test.sh
 ```
 
-The script starts a disposable OpenBao instance, tests AppRole authentication,
-environment/file/template injection, masking, and credential stripping, then
-removes the container and its storage volume. Set `OPENBAO_PORT` if port 8200
-is already in use:
+The script starts one disposable OpenBao instance, builds the wrapper once, and
+runs isolated scenarios covering AppRole and direct-token authentication,
+`BAO_*`/`VAULT_*` fallback behavior, KV v1/v2 and full-JSON reads, environment
+and file injection, custom outfiles, selective template masking, custom secret
+prefixes, credential stripping, child failures, temporary-file cleanup, and
+token revocation. It then removes the container, storage volume, and test
+artifacts. Set `OPENBAO_PORT` if port 8200 is already in use:
 
 ```bash
 OPENBAO_PORT=18200 ./integration/test.sh
@@ -486,6 +489,11 @@ OPENBAO_PORT=18200 ./integration/test.sh
 
 The credentials in `compose.yaml` are public fixtures for local and CI testing
 only. They must never be used in a persistent or production environment.
+
+TLS/custom-CA handling, JWT/OIDC, namespace headers, retry fault injection,
+signal forwarding, symlink attacks, and deterministic masker chunk boundaries
+remain in the focused Go test suites, where those failure modes can be exercised
+without adding fragile infrastructure to the OpenBao fixture.
 
 ### Building for all platforms
 

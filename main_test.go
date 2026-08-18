@@ -287,6 +287,7 @@ func TestRunBaoToken_DirectToken(t *testing.T) {
 	// client presents the token from BAO_TOKEN directly – no login endpoint
 	// should be called.
 	loginCalled := false
+	revokeCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/auth/jwt/login", "/v1/auth/approle/login":
@@ -303,7 +304,7 @@ func TestRunBaoToken_DirectToken(t *testing.T) {
 				},
 			})
 		case "/v1/auth/token/revoke-self":
-			// ignore cleanup
+			revokeCalls++
 		default:
 			http.NotFound(w, r)
 		}
@@ -331,6 +332,48 @@ func TestRunBaoToken_DirectToken(t *testing.T) {
 	}
 	if loginCalled {
 		t.Error("login endpoint must not be called when BAO_TOKEN is set")
+	}
+	if revokeCalls != 1 {
+		t.Errorf("expected token to be revoked exactly once, got %d calls", revokeCalls)
+	}
+}
+
+func TestRunBaoToken_RevokedAfterSecretFetchFailure(t *testing.T) {
+	revokeCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/kv/data/myapp/missing":
+			http.NotFound(w, r)
+		case "/v1/auth/token/revoke-self":
+			revokeCalls++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("BAO_ADDR", srv.URL)
+	t.Setenv("VAULT_ADDR", "")
+	t.Setenv("BAO_TOKEN", "direct-token")
+	t.Setenv("VAULT_TOKEN", "")
+	t.Setenv("BAO_JWT_ROLE", "")
+	t.Setenv("BAO_JWT_TOKEN", "")
+	t.Setenv("BAO_APP_ID", "")
+	t.Setenv("BAO_APP_SECRET", "")
+	t.Setenv("BAO_NAMESPACE", "")
+	t.Setenv("BAO_CACERT", "")
+	t.Setenv("VAULT_CACERT", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+	t.Setenv("SECRET_NOT_FOUND", "value@kv/myapp/missing")
+
+	code := run([]string{"run", "--", "must-not-start"})
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if revokeCalls != 1 {
+		t.Errorf("expected token to be revoked exactly once after fetch failure, got %d calls", revokeCalls)
 	}
 }
 
