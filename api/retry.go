@@ -1,11 +1,26 @@
 package api
 
 import (
+	"context"
 	"io"
 	"math/rand/v2"
 	"net/http"
 	"time"
 )
+
+type transientRetriesKey struct{}
+
+// withTransientRetries opts a single request into the retry transport. Retry
+// is deliberately disabled by default so operations that can create new
+// credentials, such as login, are never repeated transparently.
+func withTransientRetries(ctx context.Context) context.Context {
+	return context.WithValue(ctx, transientRetriesKey{}, true)
+}
+
+func transientRetriesEnabled(ctx context.Context) bool {
+	enabled, _ := ctx.Value(transientRetriesKey{}).(bool)
+	return enabled
+}
 
 const (
 	maxRetries = 3
@@ -13,11 +28,11 @@ const (
 	maxJitter  = 500 * time.Millisecond
 )
 
-// retryTransport is an http.RoundTripper that retries requests on transient
-// network errors and on 502/503/504 responses using exponential backoff with
-// jitter. Permanent client errors (4xx) are never retried.
+// retryTransport is an http.RoundTripper that retries explicitly opted-in
+// requests on transient network errors and on 502/503/504 responses using
+// exponential backoff with jitter. All other requests are attempted once.
 type retryTransport struct {
-	base    http.RoundTripper
+	base http.RoundTripper
 	// sleepFn is used instead of time.Sleep when set; intended for tests.
 	sleepFn func(time.Duration)
 }
@@ -49,6 +64,10 @@ func (t *retryTransport) doSleep(d time.Duration) {
 // transient failures. The request body is reset via req.GetBody before each
 // retry (http.NewRequest sets GetBody automatically for *bytes.Reader bodies).
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !transientRetriesEnabled(req.Context()) {
+		return t.base.RoundTrip(req)
+	}
+
 	var (
 		resp *http.Response
 		err  error

@@ -40,9 +40,12 @@ func New(addr, namespace string) *Client {
 	return NewWithTransport(addr, namespace, nil)
 }
 
-// NewWithTransport creates a new Client with a custom base RoundTripper that is
-// wrapped inside the retry transport. If base is nil, http.DefaultTransport is used.
-// Use this when a custom TLS configuration (e.g. a corporate CA certificate) is required.
+// NewWithTransport creates a new Client with a custom base RoundTripper. Secret
+// reads and token revocation are retried on transient failures; authentication
+// requests are attempted exactly once. If base is nil, http.DefaultTransport is
+// used. Use this when a custom TLS configuration (e.g. a corporate CA
+// certificate) is required. The supplied transport must not independently
+// retry non-idempotent requests.
 func NewWithTransport(addr, namespace string, base http.RoundTripper) *Client {
 	return &Client{
 		addr:      strings.TrimRight(addr, "/"),
@@ -247,7 +250,7 @@ func (c *Client) RevokeToken() error {
 		ctx, cancel = context.WithTimeout(context.Background(), cleanupTimeout)
 		defer cancel()
 	}
-	_, err := c.doWithContext(ctx, http.MethodPost, "/v1/auth/token/revoke-self", nil)
+	_, err := c.doWithTransientRetries(ctx, http.MethodPost, "/v1/auth/token/revoke-self", nil)
 	return err
 }
 
@@ -314,8 +317,12 @@ func (c *Client) do(method, path string, body []byte) ([]byte, error) {
 	return c.doWithContext(c.effectiveCtx(), method, path, body)
 }
 
+func (c *Client) doWithTransientRetries(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	return c.doWithContext(withTransientRetries(ctx), method, path, body)
+}
+
 func (c *Client) get(path string) ([]byte, error) {
-	return c.do(http.MethodGet, path, nil)
+	return c.doWithTransientRetries(c.effectiveCtx(), http.MethodGet, path, nil)
 }
 
 func (c *Client) post(path string, body []byte) ([]byte, error) {
