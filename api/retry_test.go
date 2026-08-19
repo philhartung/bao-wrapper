@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -12,6 +14,23 @@ import (
 // noopSleep is a sleep function that returns immediately, used in tests to
 // avoid real delays while still exercising the retry/backoff code paths.
 func noopSleep(time.Duration) {}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func login(c *Client, authMethod string) error {
+	switch authMethod {
+	case "jwt":
+		return c.LoginJWT("role", "jwt")
+	case "approle":
+		return c.LoginAppRole("role-id", "secret-id")
+	default:
+		panic("unsupported test auth method: " + authMethod)
+	}
+}
 
 // newTestRetryClient builds a Client that uses a retryTransport with a no-op
 // sleep function so tests complete quickly.
@@ -27,9 +46,9 @@ func newTestRetryClient(addr string) *Client {
 	}
 }
 
-// TestRetry_SuccessAfterTransient503 verifies that the client retries on 503
-// and eventually succeeds once the server returns 200.
-func TestRetry_SuccessAfterTransient503(t *testing.T) {
+// TestRetry_SecretReadSuccessAfterTransient503 verifies that secret reads opt
+// into retries and eventually succeed once the server returns 200.
+func TestRetry_SecretReadSuccessAfterTransient503(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&calls, 1)
@@ -37,18 +56,88 @@ func TestRetry_SuccessAfterTransient503(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		w.WriteHeader(http.StatusNoContent)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"data":{"field":"value"}}}`))
 	}))
 	defer srv.Close()
 
 	c := newTestRetryClient(srv.URL)
 	c.SetToken("tok")
 
-	if err := c.RevokeToken(); err != nil {
+	value, err := c.ReadSecret("kv/test", "field", 2)
+	if err != nil {
 		t.Fatalf("expected success after retries, got: %v", err)
+	}
+	if value != "value" {
+		t.Errorf("expected secret value, got %q", value)
 	}
 	if calls != 3 {
 		t.Errorf("expected 3 calls, got %d", calls)
+	}
+}
+
+// TestRetry_LoginNotRetriedOnTransientStatus verifies that token-issuing
+// login requests are never repeated after a retryable proxy/server response.
+func TestRetry_LoginNotRetriedOnTransientStatus(t *testing.T) {
+	for _, authMethod := range []string{"jwt", "approle"} {
+		for _, status := range []int{
+			http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout,
+		} {
+			t.Run(fmt.Sprintf("%s_%d", authMethod, status), func(t *testing.T) {
+				var calls int32
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					atomic.AddInt32(&calls, 1)
+					w.WriteHeader(status)
+				}))
+				defer srv.Close()
+
+				c := newTestRetryClient(srv.URL)
+				if err := login(c, authMethod); err == nil {
+					t.Fatalf("expected login error for status %d", status)
+				}
+				if calls != 1 {
+					t.Errorf("expected exactly 1 login request, got %d", calls)
+				}
+				if c.Token() != "" {
+					t.Error("login failure must not store a token")
+				}
+			})
+		}
+	}
+}
+
+// TestRetry_LoginNotRetriedOnAmbiguousTransportError simulates a transport
+// losing the response after the server may already have issued a token. The
+// wrapper must propagate the error instead of issuing another login request.
+func TestRetry_LoginNotRetriedOnAmbiguousTransportError(t *testing.T) {
+	for _, authMethod := range []string{"jwt", "approle"} {
+		t.Run(authMethod, func(t *testing.T) {
+			var issued int32
+			base := roundTripFunc(func(*http.Request) (*http.Response, error) {
+				atomic.AddInt32(&issued, 1)
+				return nil, errors.New("response lost after request processing")
+			})
+			c := &Client{
+				addr: "https://openbao.invalid",
+				http: &http.Client{Transport: &retryTransport{
+					base:    base,
+					sleepFn: noopSleep,
+				}},
+				ctx: context.Background(),
+			}
+
+			if err := login(c, authMethod); err == nil {
+				t.Fatal("expected ambiguous transport error")
+			}
+			if issued != 1 {
+				t.Errorf("expected exactly 1 possible token issuance, got %d", issued)
+			}
+			if c.Token() != "" {
+				t.Error("ambiguous login failure must not store a token")
+			}
+		})
 	}
 }
 
