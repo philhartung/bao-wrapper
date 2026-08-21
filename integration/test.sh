@@ -153,7 +153,7 @@ run_wrapper "$case_dir" \
   "SECRET_DB_PASSWORD=kv://password@kv/integration/app" \
   "SECRET_EXTENDED=kv://password_extended@kv/integration/app" \
   "SECRET_RETRIES=kv://retries@kv/integration/app" \
-  "SECRET_ALL=kv/integration/app" \
+  "SECRET_ALL=kv://kv/integration/app" \
   "SECRET_LEGACY_TOKEN=legacy://token@kvv1/integration/legacy" \
   "SECRET_APP_CONFIG=template://tpl@kv/integration/template" \
   -- run -- sh -euc '

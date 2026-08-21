@@ -324,7 +324,7 @@ func TestRunBaoToken_DirectToken(t *testing.T) {
 	t.Setenv("VAULT_CACERT", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
-	t.Setenv("SECRET_DB_PASS", "password@kv/myapp/db")
+	t.Setenv("SECRET_DB_PASS", "kv://password@kv/myapp/db")
 
 	code := run([]string{"run", "--", "env"})
 	if code != 0 {
@@ -335,6 +335,41 @@ func TestRunBaoToken_DirectToken(t *testing.T) {
 	}
 	if revokeCalls != 1 {
 		t.Errorf("expected token to be revoked exactly once, got %d calls", revokeCalls)
+	}
+}
+
+func TestRunBareAmbientSecretIsNotRequested(t *testing.T) {
+	var unexpectedRequests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/token/revoke-self" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		unexpectedRequests = append(unexpectedRequests, r.Method+" "+r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	t.Setenv("BAO_ADDR", srv.URL)
+	t.Setenv("VAULT_ADDR", "")
+	t.Setenv("BAO_TOKEN", "direct-token")
+	t.Setenv("VAULT_TOKEN", "")
+	t.Setenv("BAO_JWT_ROLE", "")
+	t.Setenv("BAO_JWT_TOKEN", "")
+	t.Setenv("BAO_APP_ID", "")
+	t.Setenv("BAO_APP_SECRET", "")
+	t.Setenv("BAO_NAMESPACE", "")
+	t.Setenv("BAO_CACERT", "")
+	t.Setenv("VAULT_CACERT", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+	t.Setenv("SECRET_AMBIENT", "hunter2")
+
+	if code := run([]string{"run", "--", "true"}); code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+	if len(unexpectedRequests) != 0 {
+		t.Fatalf("ambient secret caused Vault requests: %v", unexpectedRequests)
 	}
 }
 
@@ -366,7 +401,7 @@ func TestRunBaoToken_RevokedAfterSecretFetchFailure(t *testing.T) {
 	t.Setenv("VAULT_CACERT", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
-	t.Setenv("SECRET_NOT_FOUND", "value@kv/myapp/missing")
+	t.Setenv("SECRET_NOT_FOUND", "kv://value@kv/myapp/missing")
 
 	code := run([]string{"run", "--", "must-not-start"})
 	if code != 1 {
@@ -417,7 +452,7 @@ func TestRunVaultToken_FallbackToken(t *testing.T) {
 	t.Setenv("VAULT_CACERT", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
-	t.Setenv("SECRET_DB_PASS", "password@kv/myapp/db")
+	t.Setenv("SECRET_DB_PASS", "kv://password@kv/myapp/db")
 
 	code := run([]string{"run", "--", "env"})
 	if code != 0 {
@@ -465,7 +500,7 @@ func TestRunBaoToken_PriorityOverJWT(t *testing.T) {
 	t.Setenv("VAULT_CACERT", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
-	t.Setenv("SECRET_DB_PASS", "password@kv/myapp/db")
+	t.Setenv("SECRET_DB_PASS", "kv://password@kv/myapp/db")
 
 	code := run([]string{"run", "--", "env"})
 	if code != 0 {
@@ -513,7 +548,7 @@ func TestRunBaoToken_PriorityOverAppRole(t *testing.T) {
 	t.Setenv("VAULT_CACERT", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
-	t.Setenv("SECRET_DB_PASS", "password@kv/myapp/db")
+	t.Setenv("SECRET_DB_PASS", "kv://password@kv/myapp/db")
 
 	code := run([]string{"run", "--", "env"})
 	if code != 0 {
@@ -526,9 +561,11 @@ func TestRunBaoToken_PriorityOverAppRole(t *testing.T) {
 
 func TestRun_CustomSecretPrefix(t *testing.T) {
 	// Verify that --secret-prefix changes which env vars are treated as secrets.
+	secretRead := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/kv/data/myapp/db":
+			secretRead = true
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{
@@ -557,12 +594,15 @@ func TestRun_CustomSecretPrefix(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
 	// Use a custom prefix MYSECRET_ instead of the default SECRET_
-	t.Setenv("MYSECRET_DB_PASS", "password@kv/myapp/db")
+	t.Setenv("MYSECRET_DB_PASS", "kv://password@kv/myapp/db")
 	t.Setenv("SECRET_DB_PASS", "") // ensure the default prefix is not matched
 
 	code := run([]string{"run", "--secret-prefix", "MYSECRET_", "--", "env"})
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d", code)
+	}
+	if !secretRead {
+		t.Error("custom-prefix secret was not retrieved")
 	}
 }
 
@@ -579,9 +619,11 @@ func TestRun_SecretPrefixMissingArg(t *testing.T) {
 
 func TestRun_SecretPrefixFromEnv(t *testing.T) {
 	// BAO_SECRET_PREFIX should be used when no --secret-prefix CLI flag is given.
+	secretRead := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/kv/data/myapp/db":
+			secretRead = true
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{
@@ -610,20 +652,25 @@ func TestRun_SecretPrefixFromEnv(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
 	t.Setenv("BAO_SECRET_PREFIX", "ENVSECRET_")
-	t.Setenv("ENVSECRET_DB_PASS", "password@kv/myapp/db")
+	t.Setenv("ENVSECRET_DB_PASS", "kv://password@kv/myapp/db")
 	t.Setenv("SECRET_DB_PASS", "") // default prefix must not match
 
 	code := run([]string{"run", "--", "env"})
 	if code != 0 {
 		t.Errorf("expected exit code 0 when prefix is set via BAO_SECRET_PREFIX, got %d", code)
 	}
+	if !secretRead {
+		t.Error("environment-prefix secret was not retrieved")
+	}
 }
 
 func TestRun_SecretPrefixCLIOverridesEnv(t *testing.T) {
 	// --secret-prefix CLI flag must take priority over BAO_SECRET_PREFIX.
+	secretRead := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/kv/data/myapp/db":
+			secretRead = true
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{
@@ -653,13 +700,16 @@ func TestRun_SecretPrefixCLIOverridesEnv(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
 	// BAO_SECRET_PREFIX says "WRONG_"; CLI flag says "CLISECRET_" — CLI wins
 	t.Setenv("BAO_SECRET_PREFIX", "WRONG_")
-	t.Setenv("CLISECRET_DB_PASS", "password@kv/myapp/db")
+	t.Setenv("CLISECRET_DB_PASS", "kv://password@kv/myapp/db")
 	t.Setenv("WRONG_DB_PASS", "")
 	t.Setenv("SECRET_DB_PASS", "")
 
 	code := run([]string{"run", "--secret-prefix", "CLISECRET_", "--", "env"})
 	if code != 0 {
 		t.Errorf("expected exit code 0 when CLI --secret-prefix overrides BAO_SECRET_PREFIX, got %d", code)
+	}
+	if !secretRead {
+		t.Error("CLI-prefix secret was not retrieved")
 	}
 }
 

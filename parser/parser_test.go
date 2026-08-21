@@ -55,27 +55,17 @@ func TestParseEnv_FileType(t *testing.T) {
 	}
 }
 
-func TestParseEnv_DefaultEngine(t *testing.T) {
-	// No engine prefix, no @ – treated as bare path
-	t.Setenv("SECRET_MY_SECRET", "myapp/plain")
+func TestParseEnv_BareValueIsIgnored(t *testing.T) {
+	const ambientSecret = "hunter2"
+	t.Setenv("SECRET_AMBIENT", ambientSecret)
 
 	refs, err := parser.ParseEnv("SECRET_")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	ref := findRef(refs, "MY_SECRET")
-	if ref == nil {
-		t.Fatal("expected MY_SECRET ref")
-	}
-	if ref.Engine != "kv" {
-		t.Errorf("default engine should be kv, got %s", ref.Engine)
-	}
-	if ref.Field != "" {
-		t.Errorf("field: want empty, got %s", ref.Field)
-	}
-	if ref.Path != "myapp/plain" {
-		t.Errorf("path: want myapp/plain, got %s", ref.Path)
+	if ref := findRef(refs, "AMBIENT"); ref != nil {
+		t.Fatalf("ambient secret was parsed as a reference: %+v", ref)
 	}
 }
 
@@ -109,36 +99,40 @@ func TestParseEnv_NoSecretVars(t *testing.T) {
 }
 
 func TestParseEnv_UnknownType(t *testing.T) {
-	t.Setenv("SECRET_BAD", "field:unknown@path/to/secret")
+	const configuredValue = "super-secret-token"
+	t.Setenv("SECRET_BAD", "kv://field:"+configuredValue+"@path/to/secret")
 
 	_, err := parser.ParseEnv("SECRET_")
 	if err == nil {
 		t.Fatal("expected error for unknown secret type")
 	}
+	if strings.Contains(err.Error(), configuredValue) {
+		t.Fatalf("parser error exposed configured value: %q", err)
+	}
 }
 
-func TestParseEnv_NoScheme_IsPath(t *testing.T) {
-	t.Setenv("SECRET_SIMPLE", "some/path/to/secret")
+func TestParseEnv_MalformedReferenceErrorDoesNotExposeValue(t *testing.T) {
+	const configuredValue = "hunter2%zz"
+	t.Setenv("SECRET_BAD", "kv://"+configuredValue)
+
+	_, err := parser.ParseEnv("SECRET_")
+	if err == nil {
+		t.Fatal("expected error for malformed secret reference")
+	}
+	if strings.Contains(err.Error(), configuredValue) {
+		t.Fatalf("parser error exposed configured value: %q", err)
+	}
+}
+
+func TestParseEnv_UnknownExplicitSchemeIsIgnored(t *testing.T) {
+	t.Setenv("SECRET_SCANNING_URL", "https://scanner.example.test")
 
 	refs, err := parser.ParseEnv("SECRET_")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	ref := findRef(refs, "SIMPLE")
-	if ref == nil {
-		t.Fatal("expected SIMPLE ref")
-	}
-	if ref.Field != "" {
-		t.Errorf("field: want empty, got %s", ref.Field)
-	}
-	if ref.Path != "some/path/to/secret" {
-		t.Errorf("path: want some/path/to/secret, got %s", ref.Path)
-	}
-	if ref.Engine != "kv" {
-		t.Errorf("engine: want kv, got %s", ref.Engine)
-	}
-	if ref.Type != parser.TypeEnv {
-		t.Errorf("type: want env, got %s", ref.Type)
+	if ref := findRef(refs, "SCANNING_URL"); ref != nil {
+		t.Fatalf("unsupported scheme was parsed as a reference: %+v", ref)
 	}
 }
 
@@ -166,21 +160,21 @@ func TestParseValue_TableDriven(t *testing.T) {
 			wantPath:   "my/path",
 		},
 		{
-			input:      "password@myapp/db",
+			input:      "kv://password@myapp/db",
 			wantEngine: "kv",
 			wantField:  "password",
 			wantType:   parser.TypeEnv,
 			wantPath:   "myapp/db",
 		},
 		{
-			input:      "token:file@my/path",
+			input:      "kv://token:file@my/path",
 			wantEngine: "kv",
 			wantField:  "token",
 			wantType:   parser.TypeFile,
 			wantPath:   "my/path",
 		},
 		{
-			input:      "myapp/db",
+			input:      "kv://myapp/db",
 			wantEngine: "kv",
 			wantField:  "",
 			wantType:   parser.TypeEnv,

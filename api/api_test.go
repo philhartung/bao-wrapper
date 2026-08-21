@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/philhartung/bao-wrapper/api"
@@ -421,6 +422,26 @@ func TestReadSecret_MissingField(t *testing.T) {
 	_, err := c.ReadSecret("kv/path", "notexist", 2)
 	if err == nil {
 		t.Fatal("expected error for missing field")
+	}
+}
+
+func TestReadSecret_HTTPErrorDoesNotExposePath(t *testing.T) {
+	const configuredValue = "hunter2"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c := api.New(srv.URL, "")
+	_, err := c.ReadSecret(configuredValue, "", 2)
+	if err == nil {
+		t.Fatal("expected error for HTTP 404")
+	}
+	if strings.Contains(err.Error(), configuredValue) {
+		t.Fatalf("API error exposed configured secret path: %q", err)
+	}
+	if !strings.Contains(err.Error(), "status 404") {
+		t.Fatalf("API error should retain useful status information: %q", err)
 	}
 }
 

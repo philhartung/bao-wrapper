@@ -145,14 +145,14 @@ bao-wrapper run [options] -- <command> [args...]
 Define secrets with the configured prefix (default `SECRET_`) using this format:
 
 ```
-<PREFIX><NAME>=[[engine]://][[field][:type]@]path[?key=value&...]
+<PREFIX><NAME>=<engine>://[[field][:type]@]path[?key=value&...]
 ```
 
-All components except `path` are optional and fall back to defaults. When no delimiters (`://`, `@`) are present, the entire value is treated as the `path`.
+An explicit supported engine scheme is required. Prefixed variables without one are ignored, preventing ambient `SECRET_*` passwords, tokens, or keys from being interpreted as Vault paths. The `field`, `type`, and query parameters remain optional.
 
 | Component | Default | Description |
 |---|---|---|
-| `engine` | `kv` | Secret engine type. Only `kv`, `legacy`, and `template` are supported. `kv` uses the KV v2 API path; `legacy` uses the KV v1 API path; `template` renders a Go template stored in KV. |
+| `engine` | *(required)* | Secret engine type. Only `kv`, `legacy`, and `template` are supported. `kv` uses the KV v2 API path; `legacy` uses the KV v1 API path; `template` renders a Go template stored in KV. |
 | `field` | *(empty)* | Key in the secret data; empty = full JSON. Requires `@` separator. |
 | `type` | `env` | `env` = env var, `file` = temp file path. Specified as `field:type` before `@`. |
 | `path` | *(required)* | Full path to the secret, including the mount point (e.g. `kv/test`, `kvv1/my/secret`) |
@@ -160,7 +160,7 @@ All components except `path` are optional and fall back to defaults. When no del
 
 | Engine | API path used | Description |
 |---|---|---|
-| `kv` (default) | `GET /v1/<mount>/data/<secret_path>` (KV v2) | KV v2 secrets. The path includes the mount point; `/data/` is inserted automatically. Example: path `kv/test` → `/v1/kv/data/test` |
+| `kv` | `GET /v1/<mount>/data/<secret_path>` (KV v2) | KV v2 secrets. The path includes the mount point; `/data/` is inserted automatically. Example: path `kv/test` → `/v1/kv/data/test` |
 | `legacy` | `GET /v1/<path>` (KV v1) | KV v1 path style. The path is used as-is after validation. Example: path `kvv1/test` → `/v1/kvv1/test` |
 | `template` | *(fetches template from KV v2, then renders)* | Fetches a Go `text/template` from a KV v2 path, renders it with `{{ secret "..." }}` support (see [Template engine](#template-engine)) |
 
@@ -177,14 +177,8 @@ SECRET_DB_PASS=kv://password:env@kv/myapp/db
 # Write TLS cert to a temp file; TLS_CERT contains the file path
 SECRET_TLS_CERT=kv://cert:file@kv/myapp/tls
 
-# Without engine (defaults to kv), field with path
-SECRET_DB_PASS=password@kv/myapp/db
-
-# Without engine, with type
-SECRET_TOKEN=token:file@kv/my/path
-
-# Path only (no engine, no field, no type — reads full JSON from kv)
-SECRET_KEY=kv/myapp/db
+# Path only (no field or type — reads full JSON from kv)
+SECRET_KEY=kv://kv/myapp/db
 
 # Write a file secret to a custom path using outfile
 SECRET_DOCKER_CFG=kv://config:file@kv/myapp/docker?outfile=.docker/config.json
