@@ -436,7 +436,11 @@ flowchart TD
 - Secret values are never written to logs, error messages, or panic output.
 - Template engine uses selective masking: inner secret values are masked, the template skeleton is not.
 - All secrets (including values resolved via `{{ secret "..." }}` inside templates) are pre-registered with the masker before the child process is started.
-- The Vault token is revoked via `POST /v1/auth/token/revoke-self` on exit.
+- The Vault token is revoked via `POST /v1/auth/token/revoke-self` on normal
+  exit and immediately when the wrapper receives SIGINT or SIGTERM. Temporary
+  secret paths are unlinked at the same time.
+- Signals are forwarded to the direct child. Process-tree termination and hard
+  shutdown deadlines are delegated to the CI, container, or job runtime.
 - Short strings (≤ 3 chars) are not masked to prevent over-masking.
 - In-template URLs forbid the `template` engine to prevent recursive template rendering.
 - Legacy KV v1 lookups cannot access OpenBao's reserved `auth/`, `sys/`, `identity/`, or `cubbyhole/` endpoint prefixes.
