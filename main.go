@@ -239,14 +239,14 @@ Environment variables:
   BAO_SECRET_PREFIX  Prefix for secret variables (optional; default: SECRET_; overridden by --secret-prefix)
 
 Secret variables (<PREFIX><NAME>=<spec>):
-  Spec format:  [[engine]://][[field][:type]@]path[?key=value&...]
-  Engines:      kv (default, KV v2), legacy (KV v1), template
-  Defaults:     engine=kv, type=env, field="" (full JSON)
+  Spec format:  <engine>://[[field][:type]@]path[?key=value&...]
+  Engines:      kv (KV v2), legacy (KV v1), template
+  Defaults:     type=env, field="" (full JSON)
+  Note:         An explicit supported engine scheme is required; other values are ignored
   Path:         Full path including mount (e.g. kv/test, kvv1/my/secret)
   Examples:
     SECRET_DB_PASS=kv://password:env@kv/myapp/db
-    SECRET_DB_PASS=password@kv/myapp/db
-    SECRET_KEY=kv/myapp/db
+    SECRET_KEY=kv://kv/myapp/db
     SECRET_TLS_CERT=kv://cert:file@kv/myapp/tls
     SECRET_TOKEN=legacy://token:env@kvv1/my/path`)
 }

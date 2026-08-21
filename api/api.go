@@ -201,7 +201,7 @@ func (c *Client) ReadSecret(path, field string, kvVersion int) (string, error) {
 
 	valRaw, ok := data[field]
 	if !ok {
-		return "", fmt.Errorf("api: field %q not found in secret", field)
+		return "", fmt.Errorf("api: requested field not found in secret")
 	}
 
 	var val string
@@ -232,7 +232,7 @@ func validateSecretPath(secretPath string, kvVersion int) error {
 	if kvVersion == 1 {
 		prefix, _, _ := strings.Cut(secretPath, "/")
 		if _, reserved := reservedLegacyPathPrefixes[strings.ToLower(prefix)]; reserved {
-			return fmt.Errorf("api: legacy secret path uses reserved OpenBao prefix %q", prefix)
+			return fmt.Errorf("api: legacy secret path uses a reserved OpenBao prefix")
 		}
 	}
 
@@ -282,7 +282,9 @@ func (c *Client) doWithContext(ctx context.Context, method, path string, body []
 
 	req, err := http.NewRequestWithContext(ctx, method, c.addr+path, bodyReader)
 	if err != nil {
-		return nil, fmt.Errorf("api: create request: %w", err)
+		// Request-construction errors can quote the raw URL, including a secret
+		// path. Keep configured values out of errors returned to callers.
+		return nil, fmt.Errorf("api: create request failed")
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -295,7 +297,12 @@ func (c *Client) doWithContext(ctx context.Context, method, path string, body []
 
 	res, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("api: %s %s: %w", method, path, err)
+		// net/http transport errors commonly embed the complete request URL.
+		// Preserve cancellation semantics without exposing configured values.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("api: %s request failed: %w", method, ctxErr)
+		}
+		return nil, fmt.Errorf("api: %s request failed", method)
 	}
 	defer func() {
 		_ = res.Body.Close()
@@ -307,7 +314,7 @@ func (c *Client) doWithContext(ctx context.Context, method, path string, body []
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("api: %s %s returned status %d", method, path, res.StatusCode)
+		return nil, fmt.Errorf("api: %s returned status %d", method, res.StatusCode)
 	}
 
 	return resBody, nil

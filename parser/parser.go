@@ -1,9 +1,8 @@
 // Package parser parses SECRET_* environment variables into SecretRef descriptors.
 //
-// Variable format: SECRET_<NAME>=[[engine]://][[field][:type]@]path[?key=value&...]
+// Variable format: SECRET_<NAME>=<engine>://[[field][:type]@]path[?key=value&...]
 //
 // Defaults:
-//   - engine  → "kv"
 //   - type    → "env"
 //   - field   → "" (return entire JSON data map)
 package parser
@@ -30,7 +29,7 @@ const (
 type SecretRef struct {
 	// EnvName is the bare variable name without the "SECRET_" prefix.
 	EnvName string
-	// Engine is the KV mount (default: "kv").
+	// Engine is the explicitly selected secret engine.
 	Engine string
 	// Path is the secret path within the engine.
 	Path string
@@ -45,15 +44,18 @@ type SecretRef struct {
 // ParseEnv iterates os.Environ() and returns all SecretRef entries.
 // prefix is the environment variable prefix used to identify secret variables
 // (e.g. "SECRET_"). Variables whose key starts with prefix are parsed as
-// secret references; the prefix is stripped to derive the bare name.
+// secret references when their values use an explicit supported engine
+// scheme; the prefix is stripped to derive the bare name. Other prefixed
+// variables are ignored so ambient passwords, tokens, and keys are never
+// mistaken for Vault paths.
 func ParseEnv(prefix string) ([]SecretRef, error) {
 	return parseEnv(os.Environ(), prefix)
 }
 
 // parseEnv is the internal, testable implementation.
-// Variables with an unrecognised engine scheme (e.g. SECRET_SCANNING_URL set
-// by CI platforms) are silently skipped so that bao-wrapper can coexist with
-// environments that define other SECRET_* variables.
+// Variables without an explicit supported engine scheme (e.g. ambient
+// SECRET_* credentials or SECRET_SCANNING_URL values set by CI platforms) are
+// silently skipped.
 func parseEnv(environ []string, prefix string) ([]SecretRef, error) {
 	var refs []SecretRef
 	for _, e := range environ {
@@ -69,13 +71,16 @@ func parseEnv(environ []string, prefix string) ([]SecretRef, error) {
 		}
 		name := strings.TrimPrefix(key, prefix)
 
+		// Automatic discovery is deliberately opt-in at the value level. A bare
+		// SECRET_* value is much more likely to be an ambient credential than a
+		// Vault path, so only explicit supported schemes are references.
+		scheme, _, hasScheme := strings.Cut(value, "://")
+		if !hasScheme || !ValidEngine(scheme) {
+			continue
+		}
+
 		ref, err := parseValue(name, value)
 		if err != nil {
-			// Skip variables whose engine/scheme is not a valid bao-wrapper
-			// engine (e.g. "https://..." from CI-injected SECRET_* vars).
-			if strings.Contains(err.Error(), "unknown engine") {
-				continue
-			}
 			return nil, fmt.Errorf("parser: %s: %w", key, err)
 		}
 		refs = append(refs, ref)
@@ -96,7 +101,8 @@ func parseURL(value string) (*url.URL, bool, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, false, fmt.Errorf("parse URL: %w", err)
+		// url.Parse errors can include raw input, which may itself be a secret.
+		return nil, false, fmt.Errorf("invalid secret reference")
 	}
 	return u, hasScheme, nil
 }
@@ -142,7 +148,7 @@ func parseValue(name, value string) (SecretRef, error) {
 
 	// Validate engine (only kv, legacy, template are allowed).
 	if !ValidEngine(ref.Engine) {
-		return ref, fmt.Errorf("unknown engine %q (allowed: kv, legacy, template)", ref.Engine)
+		return ref, fmt.Errorf("unknown engine (allowed: kv, legacy, template)")
 	}
 
 	// Field and type from userinfo (field[:type]@).
@@ -155,7 +161,7 @@ func parseValue(name, value string) (SecretRef, error) {
 			case "":
 				// keep default
 			default:
-				return ref, fmt.Errorf("unknown secret type %q", typePart)
+				return ref, fmt.Errorf("unknown secret type (allowed: env, file)")
 			}
 		}
 	}
@@ -205,8 +211,8 @@ func ParseTemplateSecretURL(raw string) (SecretRef, error) {
 		return SecretRef{}, err
 	}
 	if u.User != nil {
-		if typePart, ok := u.User.Password(); ok {
-			return SecretRef{}, fmt.Errorf("type %q is not allowed in templates", typePart)
+		if _, ok := u.User.Password(); ok {
+			return SecretRef{}, fmt.Errorf("type selectors are not allowed in templates")
 		}
 	}
 
@@ -225,7 +231,7 @@ func ParseTemplateSecretURL(raw string) (SecretRef, error) {
 	case "kv", "legacy":
 		// ok
 	default:
-		return ref, fmt.Errorf("engine %q is not allowed in templates", ref.Engine)
+		return ref, fmt.Errorf("engine is not allowed in templates")
 	}
 
 	return ref, nil
