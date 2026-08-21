@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/philhartung/bao-wrapper/masker"
@@ -37,6 +39,13 @@ type SecretValue struct {
 // secretPrefix is the env-var prefix used to identify secret variables (e.g.
 // "SECRET_"). It is stripped from the child environment to prevent leakage.
 func Run(args []string, secrets []SecretValue, revoker Revoker, secretPrefix string) (int, error) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	return runWithSignalChannel(args, secrets, revoker, secretPrefix, sigCh)
+}
+
+func runWithSignalChannel(args []string, secrets []SecretValue, revoker Revoker, secretPrefix string, sigCh <-chan os.Signal) (int, error) {
 	if len(args) == 0 {
 		return 1, fmt.Errorf("runner: no command specified")
 	}
@@ -52,12 +61,27 @@ func Run(args []string, secrets []SecretValue, revoker Revoker, secretPrefix str
 		return 1, fmt.Errorf("runner: open temp dir: %w", err)
 	}
 
-	cleanup := func() {
-		if revoker != nil {
-			_ = revoker.RevokeToken()
-		}
-		_ = tmpRoot.Close()
-		_ = os.RemoveAll(tmpDir)
+	var cleanupOnce sync.Once
+	cleanupDone := make(chan struct{})
+	var closeRootErr, revokeErr error
+	startCleanup := func() {
+		cleanupOnce.Do(func() {
+			go func() {
+				closeRootErr = tmpRoot.Close()
+				_ = os.RemoveAll(tmpDir)
+				if revoker != nil {
+					revokeErr = revoker.RevokeToken()
+				}
+				close(cleanupDone)
+			}()
+		})
+	}
+	finishCleanup := func() error {
+		startCleanup()
+		<-cleanupDone
+		// Retry after the child exits because Windows may reject signal-time
+		// removal while the child has a file open.
+		return errors.Join(closeRootErr, os.RemoveAll(tmpDir), revokeErr)
 	}
 
 	// Build the extra environment entries and collect plaintext values for masking.
@@ -81,23 +105,23 @@ func Run(args []string, secrets []SecretValue, revoker Revoker, secretPrefix str
 			if outfile := sv.Ref.Args["outfile"]; outfile != "" {
 				path = outfile
 				if err := writeSecretFile(path, sv.Value); err != nil {
-					cleanup()
+					_ = finishCleanup()
 					return 1, fmt.Errorf("runner: create secret file: %w", err)
 				}
 			} else {
 				path = filepath.Join(tmpDir, sv.Ref.EnvName)
 				f, err := tmpRoot.OpenFile(sv.Ref.EnvName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 				if err != nil {
-					cleanup()
+					_ = finishCleanup()
 					return 1, fmt.Errorf("runner: create secret file: %w", err)
 				}
 				if _, err := f.WriteString(sv.Value); err != nil {
 					_ = f.Close()
-					cleanup()
+					_ = finishCleanup()
 					return 1, fmt.Errorf("runner: write secret file: %w", err)
 				}
 				if err := f.Close(); err != nil {
-					cleanup()
+					_ = finishCleanup()
 					return 1, fmt.Errorf("runner: close secret file: %w", err)
 				}
 			}
@@ -119,43 +143,45 @@ func Run(args []string, secrets []SecretValue, revoker Revoker, secretPrefix str
 	cmd.Stderr = errWriter
 	cmd.Stdin = os.Stdin
 
-	// Handle OS signals: forward SIGINT/SIGTERM to the child, then clean up.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
+	// Revoke the token and unlink temporary secrets as soon as a shutdown signal
+	// arrives. Process-tree enforcement is deliberately left to the CI/container
+	// runtime; the runner forwards signals only to its direct child.
 	if err := cmd.Start(); err != nil {
-		cleanup()
+		_ = finishCleanup()
 		return 1, fmt.Errorf("runner: start process: %w", err)
 	}
-
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- cmd.Wait() }()
 
-	select {
-	case sig := <-sigCh:
-		// Forward signal to child, then wait for it to finish.
-		if cmd.Process != nil {
-			_ = cmd.Process.Signal(sig)
+	var waitErr, signalErr error
+waitLoop:
+	for {
+		select {
+		case waitErr = <-doneCh:
+			break waitLoop
+		case sig := <-sigCh:
+			startCleanup()
+			if err := cmd.Process.Signal(sig); err != nil {
+				signalErr = errors.Join(signalErr, fmt.Errorf("forward signal to child: %w", err))
+			}
 		}
-		<-doneCh
-	case <-doneCh:
-		// Child finished on its own.
 	}
-
-	signal.Stop(sigCh)
 
 	// Flush masked writer buffers.
 	_ = outWriter.Flush()
 	_ = errWriter.Flush()
 
-	cleanup()
+	cleanupErr := finishCleanup()
 
 	exitCode := cmd.ProcessState.ExitCode()
 	if exitCode < 0 {
-		// Process killed by signal; use 1 as a safe default.
 		exitCode = 1
 	}
-	return exitCode, nil
+	var exitErr *exec.ExitError
+	if waitErr != nil && !errors.As(waitErr, &exitErr) {
+		return 1, errors.Join(fmt.Errorf("runner: wait for process: %w", waitErr), signalErr, cleanupErr)
+	}
+	return exitCode, errors.Join(signalErr, cleanupErr)
 }
 
 // valuesForMasking selects plaintext values that should be registered with

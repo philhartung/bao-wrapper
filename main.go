@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/philhartung/bao-wrapper/api"
@@ -24,6 +25,17 @@ import (
 //	                   -X main.commit=$(git rev-parse HEAD)" .
 var version = "dev"
 var commit = "none"
+
+type onceRevoker struct {
+	once   sync.Once
+	revoke func() error
+	err    error
+}
+
+func (revoker *onceRevoker) RevokeToken() error {
+	revoker.once.Do(func() { revoker.err = revoker.revoke() })
+	return revoker.err
+}
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -153,10 +165,11 @@ func run(args []string) int {
 	// The CLI owns the authenticated token lifecycle. Register cleanup before
 	// parsing or fetching secrets so failures before child startup revoke the
 	// token too. RevokeToken supplies a fresh timeout context after signals.
+	var tokenRevoker runner.Revoker
 	if tokenAcquired {
-		defer func() {
-			_ = client.RevokeToken()
-		}()
+		revoker := &onceRevoker{revoke: client.RevokeToken}
+		tokenRevoker = revoker
+		defer func() { _ = revoker.RevokeToken() }()
 	}
 
 	// Parse secret variables using the configured prefix.
@@ -194,9 +207,9 @@ func run(args []string) int {
 		secretValues = append(secretValues, runner.SecretValue{Ref: ref, Value: val})
 	}
 
-	// main owns token revocation; runner still accepts a Revoker for callers
-	// that use the package directly, but passing nil prevents duplicate calls.
-	exitCode, err := runner.Run(cmdArgs, secretValues, nil, secretPrefix)
+	// The shared idempotent revoker lets runner revoke immediately on a signal,
+	// while this function's defer still covers failures before child startup.
+	exitCode, err := runner.Run(cmdArgs, secretValues, tokenRevoker, secretPrefix)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 	}
