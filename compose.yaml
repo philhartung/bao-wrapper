@@ -2,7 +2,7 @@ name: bao-wrapper-integration
 
 services:
   openbao-data-init:
-    image: ghcr.io/openbao/openbao:2.6.1
+    image: ghcr.io/openbao/openbao:2.6.2
     user: "0"
     entrypoint: ["sh", "-c"]
     command: ["chown -R 100:1000 /openbao/data"]
@@ -10,7 +10,7 @@ services:
       - openbao-data:/openbao/data
 
   openbao:
-    image: ghcr.io/openbao/openbao:2.6.1
+    image: ghcr.io/openbao/openbao:2.6.2
     command: server
     depends_on:
       openbao-data-init:
