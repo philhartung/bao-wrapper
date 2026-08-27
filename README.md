@@ -27,7 +27,7 @@ It fetches secrets at runtime, injects them into the child process's environment
 | Feature | Details |
 |---|---|
 | **Zero external dependencies** | Uses only the Go standard library (`net/http`, `encoding/json`, …) |
-| **Secure token lifecycle** | Authenticates via JWT or AppRole login, revokes the token on exit |
+| **Secure token lifecycle** | Authenticates via direct token, JWT, or AppRole login and revokes the client token on exit |
 | **Real-time log masking** | Chunk-boundary-safe masked writer replaces secrets with `[MASKED]` |
 | **`env` and `file` injection** | Secrets are exposed as env vars or temp files (`0600`); sensitive config vars are stripped from the child process |
 | **Template engine** | Go `text/template` rendering with in-template `{{ secret "..." }}` lookups and selective masking |
@@ -44,8 +44,8 @@ It fetches secrets at runtime, injects them into the child process's environment
 
 ```bash
 # Linux amd64; update both values deliberately when upgrading.
-BAO_WRAPPER_VERSION=v0.1.1
-BAO_WRAPPER_SHA256=60d55e0c4541bf909bcff3b9db97b2d48fb16464f87ed8368294fbec815453bd
+BAO_WRAPPER_VERSION=v0.2.1
+BAO_WRAPPER_SHA256=7268dac9d76b24c712217993b83755bcea1945f296a0ab306da78a0eb1949c56
 curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64"
 printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper-linux-amd64 | sha256sum --check --strict
 install -m 0755 bao-wrapper-linux-amd64 bao-wrapper
@@ -130,7 +130,7 @@ bao-wrapper run [options] -- <command> [args...]
 |---|---|---|---|
 | `BAO_ADDR` | `VAULT_ADDR` | **yes** | OpenBao/Vault server URL (e.g. `https://openbao.example.com`) |
 | `BAO_NAMESPACE` | `VAULT_NAMESPACE` | no | Namespace |
-| `BAO_TOKEN` | `VAULT_TOKEN` | no | Direct client token; takes priority over all login methods. Use when a token is already available (e.g. local dev, pre-issued tokens). |
+| `BAO_TOKEN` | `VAULT_TOKEN` | no | Direct client token; takes priority over all login methods. Use when a token is already available (e.g. local dev, pre-issued tokens). **The token is revoked on exit** (normal exit, error, or SIGINT/SIGTERM) and cannot be reused afterwards, so do not supply a long-lived or shared static token that must survive multiple runs or jobs. |
 | `BAO_JWT_ROLE` | `VAULT_JWT_ROLE` | no | JWT auth role (used when `BAO_TOKEN` is not set; skips JWT login when omitted) |
 | `BAO_JWT_TOKEN` | `VAULT_JWT_TOKEN` | no | JWT token for authentication (auto-detected from GitHub Actions OIDC when unset) |
 | `BAO_APP_ID` | `VAULT_APP_ID` | no | AppRole role ID (used when `BAO_TOKEN` and `BAO_JWT_ROLE` are not set) |
@@ -306,8 +306,8 @@ build:
     SECRET_DOCKER_CFG: "template://tpl:file@kv/ci/docker-config?outfile=.docker/config.json"
   before_script:
     - |
-      BAO_WRAPPER_VERSION=v0.1.1
-      BAO_WRAPPER_SHA256=60d55e0c4541bf909bcff3b9db97b2d48fb16464f87ed8368294fbec815453bd
+      BAO_WRAPPER_VERSION=v0.2.1
+      BAO_WRAPPER_SHA256=7268dac9d76b24c712217993b83755bcea1945f296a0ab306da78a0eb1949c56
       curl -fsSL \
         "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
         -o /usr/local/bin/bao-wrapper
@@ -349,8 +349,8 @@ jobs:
 
       - name: Install bao-wrapper
         run: |
-          BAO_WRAPPER_VERSION=v0.1.1
-          BAO_WRAPPER_SHA256=60d55e0c4541bf909bcff3b9db97b2d48fb16464f87ed8368294fbec815453bd
+          BAO_WRAPPER_VERSION=v0.2.1
+          BAO_WRAPPER_SHA256=7268dac9d76b24c712217993b83755bcea1945f296a0ab306da78a0eb1949c56
           curl -fsSL \
             "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
             -o bao-wrapper
