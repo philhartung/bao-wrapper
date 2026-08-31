@@ -19,6 +19,14 @@ import (
 	"time"
 )
 
+const successfulRunChildHelperEnv = "GO_WANT_BAO_WRAPPER_SUCCESSFUL_RUN_CHILD"
+
+func TestSuccessfulRunChildHelper(t *testing.T) {
+	if os.Getenv(successfulRunChildHelperEnv) == "" {
+		return
+	}
+}
+
 func TestRunVersion(t *testing.T) {
 	for _, arg := range []string{"version", "-v", "--version"} {
 		t.Run(arg, func(t *testing.T) {
@@ -335,6 +343,45 @@ func TestRunBaoToken_DirectToken(t *testing.T) {
 	}
 	if revokeCalls != 1 {
 		t.Errorf("expected token to be revoked exactly once, got %d calls", revokeCalls)
+	}
+}
+
+func TestRunBaoToken_RevokeFailureReturnsNonzero(t *testing.T) {
+	revokeCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/token/revoke-self" {
+			http.NotFound(w, r)
+			return
+		}
+		revokeCalls++
+		http.Error(w, "cleanup failed", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	t.Setenv("BAO_ADDR", srv.URL)
+	t.Setenv("VAULT_ADDR", "")
+	t.Setenv("BAO_TOKEN", "direct-token")
+	t.Setenv("VAULT_TOKEN", "")
+	t.Setenv("BAO_JWT_ROLE", "")
+	t.Setenv("BAO_JWT_TOKEN", "")
+	t.Setenv("BAO_APP_ID", "")
+	t.Setenv("BAO_APP_SECRET", "")
+	t.Setenv("BAO_NAMESPACE", "")
+	t.Setenv("BAO_CACERT", "")
+	t.Setenv("VAULT_CACERT", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+	t.Setenv(successfulRunChildHelperEnv, "1")
+
+	code := run([]string{
+		"run", "--secret-prefix", "TEST_CLEANUP_SECRET_", "--",
+		os.Args[0], "-test.run=^TestSuccessfulRunChildHelper$",
+	})
+	if code != 1 {
+		t.Fatalf("expected exit code 1 when token revocation fails, got %d", code)
+	}
+	if revokeCalls != 1 {
+		t.Fatalf("expected one token revocation attempt, got %d", revokeCalls)
 	}
 }
 

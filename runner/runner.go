@@ -34,7 +34,8 @@ type SecretValue struct {
 //   - injects resolved secrets into the child environment (env or file)
 //   - masks all secret values in stdout/stderr in real-time
 //   - revokes the Vault token and removes temp files on exit or signal
-//   - returns the child's exit code
+//   - returns the child's exit code, or a nonzero code when cleanup fails after
+//     the child succeeds
 //
 // secretPrefix is the env-var prefix used to identify secret variables (e.g.
 // "SECRET_"). It is stripped from the child environment to prevent leakage.
@@ -46,6 +47,17 @@ func Run(args []string, secrets []SecretValue, revoker Revoker, secretPrefix str
 }
 
 func runWithSignalChannel(args []string, secrets []SecretValue, revoker Revoker, secretPrefix string, sigCh <-chan os.Signal) (int, error) {
+	return runWithCleanup(args, secrets, revoker, secretPrefix, sigCh, os.RemoveAll)
+}
+
+func runWithCleanup(
+	args []string,
+	secrets []SecretValue,
+	revoker Revoker,
+	secretPrefix string,
+	sigCh <-chan os.Signal,
+	removeAll func(string) error,
+) (int, error) {
 	if len(args) == 0 {
 		return 1, fmt.Errorf("runner: no command specified")
 	}
@@ -57,7 +69,7 @@ func runWithSignalChannel(args []string, secrets []SecretValue, revoker Revoker,
 	}
 	tmpRoot, err := os.OpenRoot(tmpDir)
 	if err != nil {
-		_ = os.RemoveAll(tmpDir)
+		_ = removeAll(tmpDir)
 		return 1, fmt.Errorf("runner: open temp dir: %w", err)
 	}
 
@@ -68,7 +80,7 @@ func runWithSignalChannel(args []string, secrets []SecretValue, revoker Revoker,
 		cleanupOnce.Do(func() {
 			go func() {
 				closeRootErr = tmpRoot.Close()
-				_ = os.RemoveAll(tmpDir)
+				_ = removeAll(tmpDir)
 				if revoker != nil {
 					revokeErr = revoker.RevokeToken()
 				}
@@ -81,7 +93,7 @@ func runWithSignalChannel(args []string, secrets []SecretValue, revoker Revoker,
 		<-cleanupDone
 		// Retry after the child exits because Windows may reject signal-time
 		// removal while the child has a file open.
-		return errors.Join(closeRootErr, os.RemoveAll(tmpDir), revokeErr)
+		return errors.Join(closeRootErr, removeAll(tmpDir), revokeErr)
 	}
 
 	// Build the extra environment entries and collect plaintext values for masking.
@@ -180,6 +192,9 @@ waitLoop:
 	var exitErr *exec.ExitError
 	if waitErr != nil && !errors.As(waitErr, &exitErr) {
 		return 1, errors.Join(fmt.Errorf("runner: wait for process: %w", waitErr), signalErr, cleanupErr)
+	}
+	if exitCode == 0 && cleanupErr != nil {
+		exitCode = 1
 	}
 	return exitCode, errors.Join(signalErr, cleanupErr)
 }
