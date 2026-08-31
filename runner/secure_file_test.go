@@ -9,7 +9,7 @@ import (
 )
 
 func TestWriteSecretFileCreatesPrivateFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nested", "secret")
+	path := filepath.Join(realTempDir(t), "nested", "secret")
 	if err := writeSecretFile(path, "new-secret"); err != nil {
 		t.Fatalf("writeSecretFile() error = %v", err)
 	}
@@ -19,7 +19,7 @@ func TestWriteSecretFileCreatesPrivateFile(t *testing.T) {
 }
 
 func TestWriteSecretFileReplacesExistingFileWithPrivateFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "secret")
+	path := filepath.Join(realTempDir(t), "secret")
 	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestWriteSecretFileReplacesExistingFileWithPrivateFile(t *testing.T) {
 }
 
 func TestWriteSecretFileRejectsOutfileSymlink(t *testing.T) {
-	dir := t.TempDir()
+	dir := realTempDir(t)
 	target := filepath.Join(dir, "target")
 	path := filepath.Join(dir, "secret")
 	if err := os.WriteFile(target, []byte("must-not-change"), 0600); err != nil {
@@ -60,7 +60,7 @@ func TestWriteSecretFileRejectsOutfileSymlink(t *testing.T) {
 }
 
 func TestWriteSecretFileRejectsNonRegularOutfile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "secret")
+	path := filepath.Join(realTempDir(t), "secret")
 	if err := os.Mkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -72,16 +72,16 @@ func TestWriteSecretFileRejectsNonRegularOutfile(t *testing.T) {
 }
 
 func TestWriteSecretFileRejectsSymlinkInParentPath(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("descriptor-based no-follow path traversal is Linux-specific")
-	}
-	dir := t.TempDir()
+	dir := realTempDir(t)
 	realDir := filepath.Join(dir, "real")
 	if err := os.Mkdir(realDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	linkDir := filepath.Join(dir, "link")
 	if err := os.Symlink(realDir, linkDir); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
 		t.Fatal(err)
 	}
 
@@ -92,6 +92,18 @@ func TestWriteSecretFileRejectsSymlinkInParentPath(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(realDir, "secret")); !os.IsNotExist(err) {
 		t.Fatalf("secret was written through parent symlink: %v", err)
 	}
+}
+
+// macOS commonly exposes the temporary directory through /var, which is a
+// system symlink to /private/var. Resolve the test fixture itself so each test
+// exercises only the path component it deliberately makes into a symlink.
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temporary directory: %v", err)
+	}
+	return dir
 }
 
 func assertFileContent(t *testing.T, path, want string) {
