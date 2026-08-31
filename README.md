@@ -317,7 +317,7 @@ build:
     - bao-wrapper run -- npm run build
 ```
 
-The child process receives the resolved secret values as environment variables (e.g. `NPM_TOKEN=<actual value>`) while all sensitive configuration variables (`BAO_*`, `VAULT_*`, `SECRET_*` (or the custom prefix), `ACTIONS_ID_TOKEN_REQUEST_*`) are stripped from its environment. Any accidental `console.log` printing of `NPM_TOKEN` will appear as `[MASKED]` in the job log. On this Unix runner, the rendered Docker config file at `.docker/config.json` is written with `0600` permissions and the inner secrets it contains are masked in logs.
+The child process receives the resolved secret values as environment variables (e.g. `NPM_TOKEN=<actual value>`) while all sensitive configuration variables (`BAO_*`, `VAULT_*`, `SECRET_*` (or the custom prefix), `ACTIONS_ID_TOKEN_REQUEST_*`) are stripped from its environment. Any accidental `console.log` printing of `NPM_TOKEN` will appear as `[MASKED]` in the job log. The rendered Docker config file at `.docker/config.json` is written with `0600` permissions and the inner secrets it contains are masked in logs.
 
 ---
 
