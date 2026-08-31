@@ -106,7 +106,7 @@ export SECRET_DB_PASS="kv://password@kv/myapp/db"
 bao-wrapper run -- ./my-app
 ```
 
-The child process receives `DB_PASS=<actual value>` in its environment. The raw secret never appears in logs — it is replaced with `[MASKED]`. For full CI pipeline examples, see [GitLab CI](#gitlab-ci-pipeline) and [GitHub Actions](#github-actions-pipeline).
+The child process receives `DB_PASS=<actual value>` in its environment. As a defense-in-depth measure against accidental plaintext logging, bao-wrapper replaces exact occurrences of registered secrets longer than three bytes in the child's captured stdout and stderr with `[MASKED]`. This masking is not a security boundary; see [Security notes](#security-notes) for its limitations. For full CI pipeline examples, see [GitLab CI](#gitlab-ci-pipeline) and [GitHub Actions](#github-actions-pipeline).
 
 > **Note:** Variables with the secret prefix that use an unrecognised engine scheme (e.g. `SECRET_SCANNING_URL` set by CI platforms) are silently skipped.
 
@@ -275,7 +275,7 @@ bao-wrapper will:
 The template engine applies selective masking to avoid over-masking while still protecting secret values:
 
 - **Template skeleton** (the static text around `{{ secret }}` calls) is **not** masked. This prevents large rendered configs from triggering false-positive masking in log output.
-- **Inner secret values** (each value resolved via `{{ secret "..." }}`) **are** registered with the masking writer. Any log output containing these values will show `[MASKED]`.
+- **Inner secret values** (each value resolved via `{{ secret "..." }}`) **are** registered with the masking writer. Exact plaintext occurrences of values longer than three bytes in captured stdout or stderr will show `[MASKED]`.
 
 ---
 
@@ -317,7 +317,7 @@ build:
     - bao-wrapper run -- npm run build
 ```
 
-The child process receives the resolved secret values as environment variables (e.g. `NPM_TOKEN=<actual value>`) while all sensitive configuration variables (`BAO_*`, `VAULT_*`, `SECRET_*` (or the custom prefix), `ACTIONS_ID_TOKEN_REQUEST_*`) are stripped from its environment. Any accidental `console.log` printing of `NPM_TOKEN` will appear as `[MASKED]` in the job log. The rendered Docker config file at `.docker/config.json` is written with `0600` permissions and the inner secrets it contains are masked in logs.
+The child process receives the resolved secret values as environment variables (e.g. `NPM_TOKEN=<actual value>`) while all sensitive configuration variables (`BAO_*`, `VAULT_*`, `SECRET_*` (or the custom prefix), `ACTIONS_ID_TOKEN_REQUEST_*`) are stripped from its environment. If `NPM_TOKEN` is longer than three bytes, an accidental `console.log` printing its exact plaintext value will appear as `[MASKED]` in the job log. The rendered Docker config file at `.docker/config.json` is written with `0600` permissions, and its inner secrets are registered for masking in captured stdout and stderr.
 
 ---
 
@@ -428,15 +428,15 @@ flowchart TD
 - Windows does not implement Unix `0600` as an owner-only ACL. File secrets inherit the containing directory's Windows ACL. In particular, a persistent custom outfile is safe only when its parent directory already has an appropriately restrictive ACL; the atomic replacement inherits that parent ACL rather than preserving the replaced file's ACL.
 - Temp-directory files and same-directory outfile staging files use exclusive creation. Outfiles are installed with an atomic rename.
 - Custom outfile parent components are resolved from the filesystem or volume root using directory handles. Symbolic links in the parent path are rejected, as are components changed to a different filesystem object while they are being opened.
-- Secret values are never written to logs, error messages, or panic output.
-- Template engine uses selective masking: inner secret values are masked, the template skeleton is not.
+- Output masking is a defense-in-depth measure against accidental plaintext leakage. Exact occurrences of registered secrets longer than three bytes in the child process's captured stdout and stderr are replaced with `[MASKED]`; secrets of three bytes or fewer are deliberately not masked to prevent over-masking.
+- Masking is not a security boundary and cannot prevent malicious child code from intentionally exfiltrating secrets. Encoded, escaped, transformed, or noncontiguous fragments do not match the plaintext masker, and output sent anywhere other than the captured stdout and stderr bypasses it.
+- Template engine uses selective masking: inner secret values are registered with the masker, while the template skeleton is not.
 - All secrets (including values resolved via `{{ secret "..." }}` inside templates) are pre-registered with the masker before the child process is started.
 - The Vault token is revoked via `POST /v1/auth/token/revoke-self` on normal
   exit and immediately when the wrapper receives SIGINT or SIGTERM. Temporary
   secret paths are unlinked at the same time.
 - Signals are forwarded to the direct child. Process-tree termination and hard
   shutdown deadlines are delegated to the CI, container, or job runtime.
-- Short strings (≤ 3 chars) are not masked to prevent over-masking.
 - In-template URLs forbid the `template` engine to prevent recursive template rendering.
 - Legacy KV v1 lookups cannot access OpenBao's reserved `auth/`, `sys/`, `identity/`, or `cubbyhole/` endpoint prefixes.
 - Secret prefix variables (default `SECRET_*`) with unrecognised engine schemes are silently skipped.
