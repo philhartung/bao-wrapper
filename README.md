@@ -44,8 +44,8 @@ It fetches secrets at runtime, injects them into the child process's environment
 
 ```bash
 # Linux amd64; update both values deliberately when upgrading.
-BAO_WRAPPER_VERSION=v0.2.1
-BAO_WRAPPER_SHA256=7268dac9d76b24c712217993b83755bcea1945f296a0ab306da78a0eb1949c56
+BAO_WRAPPER_VERSION=v0.3.0
+BAO_WRAPPER_SHA256=013df6f0cb6e13c3e9b5266c08a2417619e45c64b81f5ae7faec3f66a2c9d1d5
 curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64"
 printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper-linux-amd64 | sha256sum --check --strict
 install -m 0755 bao-wrapper-linux-amd64 bao-wrapper
@@ -306,8 +306,8 @@ build:
     SECRET_DOCKER_CFG: "template://tpl:file@kv/ci/docker-config?outfile=.docker/config.json"
   before_script:
     - |
-      BAO_WRAPPER_VERSION=v0.2.1
-      BAO_WRAPPER_SHA256=7268dac9d76b24c712217993b83755bcea1945f296a0ab306da78a0eb1949c56
+      BAO_WRAPPER_VERSION=v0.3.0
+      BAO_WRAPPER_SHA256=013df6f0cb6e13c3e9b5266c08a2417619e45c64b81f5ae7faec3f66a2c9d1d5
       curl -fsSL \
         "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
         -o /usr/local/bin/bao-wrapper
@@ -349,8 +349,8 @@ jobs:
 
       - name: Install bao-wrapper
         run: |
-          BAO_WRAPPER_VERSION=v0.2.1
-          BAO_WRAPPER_SHA256=7268dac9d76b24c712217993b83755bcea1945f296a0ab306da78a0eb1949c56
+          BAO_WRAPPER_VERSION=v0.3.0
+          BAO_WRAPPER_SHA256=013df6f0cb6e13c3e9b5266c08a2417619e45c64b81f5ae7faec3f66a2c9d1d5
           curl -fsSL \
             "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
             -o bao-wrapper
