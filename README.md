@@ -29,7 +29,7 @@ It fetches secrets at runtime, injects them into the child process's environment
 | **Zero external dependencies** | Uses only the Go standard library (`net/http`, `encoding/json`, …) |
 | **Secure token lifecycle** | Authenticates via direct token, JWT, or AppRole login and revokes the client token on exit |
 | **Real-time log masking** | Chunk-boundary-safe masked writer replaces secrets with `[MASKED]` |
-| **`env` and `file` injection** | Secrets are exposed as env vars or temp files (`0600`); sensitive config vars are stripped from the child process |
+| **`env` and `file` injection** | Secrets are exposed as env vars or temp files (`0600` on Unix; inherited ACLs on Windows); sensitive config vars are stripped from the child process |
 | **Template engine** | Go `text/template` rendering with in-template `{{ secret "..." }}` lookups and selective masking |
 | **Outfile routing** | Write `type=file` secrets directly to a custom path via `?outfile=` query parameter |
 | **Automatic retry** | Up to 3 retries with exponential backoff on transient server errors (502/503/504) |
@@ -196,8 +196,8 @@ Query parameters can be appended to the path portion of a secret URL using stand
 
 **`outfile`** — supported on `type=file` secrets. When set, the secret content is written directly to the specified path instead of a temporary file in the isolated temp directory.
 
-- Parent directories are created automatically (`0750` permissions).
-- The file is written with `O_CREATE|O_WRONLY|O_TRUNC` and `0600` permissions.
+- Parent directories are created automatically (`0750` on Unix; inherited ACLs on Windows).
+- The file is atomically installed from an exclusively created, same-directory temporary file. Its permissions are `0600` on Unix; see the Windows ACL note under [Security notes](#security-notes).
 - Temp-directory files (without `outfile`) still use `O_EXCL` for safety.
 
 ```bash
@@ -317,7 +317,7 @@ build:
     - bao-wrapper run -- npm run build
 ```
 
-The child process receives the resolved secret values as environment variables (e.g. `NPM_TOKEN=<actual value>`) while all sensitive configuration variables (`BAO_*`, `VAULT_*`, `SECRET_*` (or the custom prefix), `ACTIONS_ID_TOKEN_REQUEST_*`) are stripped from its environment. Any accidental `console.log` printing of `NPM_TOKEN` will appear as `[MASKED]` in the job log. The rendered Docker config file at `.docker/config.json` is written with `0600` permissions and the inner secrets it contains are masked in logs.
+The child process receives the resolved secret values as environment variables (e.g. `NPM_TOKEN=<actual value>`) while all sensitive configuration variables (`BAO_*`, `VAULT_*`, `SECRET_*` (or the custom prefix), `ACTIONS_ID_TOKEN_REQUEST_*`) are stripped from its environment. Any accidental `console.log` printing of `NPM_TOKEN` will appear as `[MASKED]` in the job log. On this Unix runner, the rendered Docker config file at `.docker/config.json` is written with `0600` permissions and the inner secrets it contains are masked in logs.
 
 ---
 
@@ -424,9 +424,10 @@ flowchart TD
 - Secret reads and token revocation are retried up to 3 times on network errors or HTTP 502/503/504, using exponential backoff and jitter. JWT and AppRole login requests are attempted exactly once because retrying an ambiguously completed login could issue an untracked token.
 - Authentication roles should enforce short token TTLs and maximum TTLs: a lost login response can leave the outcome unknowable even without an automatic retry.
 - `BAO_*`, `VAULT_*`, the secret prefix variables (default `SECRET_*`), and `ACTIONS_ID_TOKEN_REQUEST_*` environment variables are stripped from the child process environment to prevent credential leakage.
-- File secrets are written with permission `0600` into an isolated temp directory.
-- Outfile directories are created with `0750` permissions; outfile contents use `0600`.
-- Temp-directory files use `O_EXCL` to prevent overwriting; outfile paths use `O_TRUNC`.
+- On Unix, file secrets use permission `0600`; outfile directories created by the wrapper use `0750`.
+- Windows does not implement Unix `0600` as an owner-only ACL. File secrets inherit the containing directory's Windows ACL. In particular, a persistent custom outfile is safe only when its parent directory already has an appropriately restrictive ACL; the atomic replacement inherits that parent ACL rather than preserving the replaced file's ACL.
+- Temp-directory files and same-directory outfile staging files use exclusive creation. Outfiles are installed with an atomic rename.
+- Custom outfile parent components are resolved from the filesystem or volume root using directory handles. Symbolic links in the parent path are rejected, as are components changed to a different filesystem object while they are being opened.
 - Secret values are never written to logs, error messages, or panic output.
 - Template engine uses selective masking: inner secret values are masked, the template skeleton is not.
 - All secrets (including values resolved via `{{ secret "..." }}` inside templates) are pre-registered with the masker before the child process is started.
