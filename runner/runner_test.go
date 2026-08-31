@@ -1,11 +1,74 @@
 package runner
 
 import (
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/philhartung/bao-wrapper/parser"
 )
+
+const successfulChildHelperEnv = "GO_WANT_BAO_WRAPPER_SUCCESSFUL_CHILD"
+
+type failingRevoker struct {
+	err error
+}
+
+func (revoker failingRevoker) RevokeToken() error {
+	return revoker.err
+}
+
+func TestSuccessfulChildHelper(t *testing.T) {
+	if os.Getenv(successfulChildHelperEnv) == "" {
+		return
+	}
+}
+
+func TestRunReturnsNonzeroWhenRevocationFailsAfterSuccessfulChild(t *testing.T) {
+	t.Setenv(successfulChildHelperEnv, "1")
+	revokeErr := errors.New("revocation failed")
+
+	exitCode, err := Run(
+		[]string{os.Args[0], "-test.run=^TestSuccessfulChildHelper$"},
+		nil,
+		failingRevoker{err: revokeErr},
+		"SECRET_",
+	)
+
+	if exitCode != 1 {
+		t.Fatalf("Run() exit code = %d, want 1", exitCode)
+	}
+	if !errors.Is(err, revokeErr) {
+		t.Fatalf("Run() error = %v, want revocation error", err)
+	}
+}
+
+func TestRunReturnsNonzeroWhenTempRemovalFailsAfterSuccessfulChild(t *testing.T) {
+	t.Setenv(successfulChildHelperEnv, "1")
+	removeErr := errors.New("temporary-file removal failed")
+
+	exitCode, err := runWithCleanup(
+		[]string{os.Args[0], "-test.run=^TestSuccessfulChildHelper$"},
+		[]SecretValue{{
+			Ref:   parser.SecretRef{Type: parser.TypeFile, EnvName: "TEST_SECRET_FILE"},
+			Value: "temporary secret",
+		}},
+		nil,
+		"SECRET_",
+		make(chan os.Signal),
+		func(path string) error {
+			return errors.Join(os.RemoveAll(path), removeErr)
+		},
+	)
+
+	if exitCode != 1 {
+		t.Fatalf("Run() exit code = %d, want 1", exitCode)
+	}
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("Run() error = %v, want temporary-file removal error", err)
+	}
+}
 
 func TestValuesForMaskingSkipsRenderedTemplate(t *testing.T) {
 	secrets := []SecretValue{
