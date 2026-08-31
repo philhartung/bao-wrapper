@@ -420,7 +420,7 @@ flowchart TD
 ## Security notes
 
 - TLS certificate validation is always enabled (`InsecureSkipVerify` is never set).
-- HTTP client has an explicit 10-second timeout.
+- Vault and GitHub OIDC HTTP clients have an explicit 10-second timeout and reject redirects. GitHub OIDC endpoints must use HTTPS, and their response bodies are limited to 64 KiB.
 - Secret reads and token revocation are retried up to 3 times on network errors or HTTP 502/503/504, using exponential backoff and jitter. JWT and AppRole login requests are attempted exactly once because retrying an ambiguously completed login could issue an untracked token.
 - Authentication roles should enforce short token TTLs and maximum TTLs: a lost login response can leave the outcome unknowable even without an automatic retry.
 - `BAO_*`, `VAULT_*`, the secret prefix variables (default `SECRET_*`), and `ACTIONS_ID_TOKEN_REQUEST_*` environment variables are stripped from the child process environment to prevent credential leakage.

@@ -8,10 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/philhartung/bao-wrapper/api"
 	"github.com/philhartung/bao-wrapper/parser"
@@ -25,6 +28,11 @@ import (
 //	                   -X main.commit=$(git rev-parse HEAD)" .
 var version = "dev"
 var commit = "none"
+
+const (
+	githubOIDCHTTPTimeout      = 10 * time.Second
+	githubOIDCMaxResponseBytes = 64 << 10
+)
 
 type onceRevoker struct {
 	once   sync.Once
@@ -272,16 +280,30 @@ func fetchGitHubActionsOIDCToken(ctx context.Context) (string, error) {
 	if requestURL == "" || requestToken == "" {
 		return "", nil
 	}
+	return requestGitHubActionsOIDCToken(ctx, requestURL, requestToken, nil)
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil) // #nosec G704 -- URL is operator-controlled via ACTIONS_ID_TOKEN_REQUEST_URL set by GitHub Actions infrastructure
+// requestGitHubActionsOIDCToken requests a token from a validated GitHub OIDC
+// endpoint. transport is nil in production and is injectable only so tests can
+// trust an httptest TLS certificate without weakening endpoint validation.
+func requestGitHubActionsOIDCToken(ctx context.Context, requestURL, requestToken string, transport http.RoundTripper) (string, error) {
+	if err := validateGitHubActionsOIDCURL(requestURL); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil) // #nosec G704 -- validated as an absolute HTTPS URL; arbitrary hosts are required for GHES
 	if err != nil {
-		return "", fmt.Errorf("build OIDC request: %w", err)
+		return "", fmt.Errorf("build OIDC request")
 	}
 	req.Header.Set("Authorization", "bearer "+requestToken)
 
-	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- URL is operator-controlled via ACTIONS_ID_TOKEN_REQUEST_URL set by GitHub Actions infrastructure
+	client := newGitHubActionsOIDCClient(transport)
+	resp, err := client.Do(req) // #nosec G704 -- validated as an absolute HTTPS URL; arbitrary hosts are required for GHES
 	if err != nil {
-		return "", fmt.Errorf("OIDC request: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("OIDC request: %w", ctxErr)
+		}
+		return "", fmt.Errorf("OIDC request failed")
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -291,9 +313,12 @@ func fetchGitHubActionsOIDCToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("OIDC endpoint returned HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, githubOIDCMaxResponseBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("read OIDC response: %w", err)
+	}
+	if len(body) > githubOIDCMaxResponseBytes {
+		return "", fmt.Errorf("OIDC response exceeds %d-byte limit", githubOIDCMaxResponseBytes)
 	}
 
 	var payload struct {
@@ -306,6 +331,41 @@ func fetchGitHubActionsOIDCToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("OIDC response contained empty token value")
 	}
 	return payload.Value, nil
+}
+
+func newGitHubActionsOIDCClient(transport http.RoundTripper) *http.Client {
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	return &http.Client{
+		Timeout:   githubOIDCHTTPTimeout,
+		Transport: transport,
+		// The bearer token must never be forwarded to another endpoint.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func validateGitHubActionsOIDCURL(rawURL string) error {
+	endpoint, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("GitHub Actions OIDC request URL is invalid")
+	}
+
+	// GitHub.com uses token.actions.githubusercontent.com, while GHES uses an
+	// installation-specific hostname. Requiring HTTPS and a well-formed
+	// authority protects both without imposing a public-GitHub-only allowlist.
+	if !strings.EqualFold(endpoint.Scheme, "https") || endpoint.Hostname() == "" || endpoint.Opaque != "" {
+		return fmt.Errorf("GitHub Actions OIDC request URL must be an absolute HTTPS URL")
+	}
+	if endpoint.User != nil {
+		return fmt.Errorf("GitHub Actions OIDC request URL must not contain user information")
+	}
+	if endpoint.Fragment != "" {
+		return fmt.Errorf("GitHub Actions OIDC request URL must not contain a fragment")
+	}
+	return nil
 }
 
 // buildTLSTransport reads the CA certificate file referenced by BAO_CACERT
