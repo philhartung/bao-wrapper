@@ -216,7 +216,7 @@ func TestFetchGitHubActionsOIDCToken_MissingToken(t *testing.T) {
 }
 
 func TestFetchGitHubActionsOIDCToken_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); auth != "bearer test-request-token" {
 			t.Errorf("expected Authorization header %q, got %q", "bearer test-request-token", auth)
 		}
@@ -227,10 +227,7 @@ func TestFetchGitHubActionsOIDCToken_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", srv.URL)
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "test-request-token")
-
-	jwt, err := fetchGitHubActionsOIDCToken(context.Background())
+	jwt, err := requestGitHubActionsOIDCToken(context.Background(), srv.URL, "test-request-token", srv.Client().Transport)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -240,22 +237,19 @@ func TestFetchGitHubActionsOIDCToken_Success(t *testing.T) {
 }
 
 func TestFetchGitHubActionsOIDCToken_HTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}))
 	defer srv.Close()
 
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", srv.URL)
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "bad-token")
-
-	_, err := fetchGitHubActionsOIDCToken(context.Background())
+	_, err := requestGitHubActionsOIDCToken(context.Background(), srv.URL, "bad-token", srv.Client().Transport)
 	if err == nil {
 		t.Fatal("expected error for HTTP 403 response")
 	}
 }
 
 func TestFetchGitHubActionsOIDCToken_InvalidJSON(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("not-json")); err != nil {
 			t.Errorf("write response: %v", err)
@@ -263,17 +257,14 @@ func TestFetchGitHubActionsOIDCToken_InvalidJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", srv.URL)
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "token")
-
-	_, err := fetchGitHubActionsOIDCToken(context.Background())
+	_, err := requestGitHubActionsOIDCToken(context.Background(), srv.URL, "token", srv.Client().Transport)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON response")
 	}
 }
 
 func TestFetchGitHubActionsOIDCToken_EmptyValue(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]string{"value": ""}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -281,12 +272,88 @@ func TestFetchGitHubActionsOIDCToken_EmptyValue(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", srv.URL)
-	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "token")
-
-	_, err := fetchGitHubActionsOIDCToken(context.Background())
+	_, err := requestGitHubActionsOIDCToken(context.Background(), srv.URL, "token", srv.Client().Transport)
 	if err == nil {
 		t.Fatal("expected error when OIDC response value is empty")
+	}
+}
+
+func TestGitHubActionsOIDCClientProtections(t *testing.T) {
+	client := newGitHubActionsOIDCClient(nil)
+	if client == http.DefaultClient {
+		t.Fatal("expected a dedicated HTTP client")
+	}
+	if client.Timeout != 10*time.Second {
+		t.Fatalf("expected a 10-second timeout, got %s", client.Timeout)
+	}
+	if client.CheckRedirect == nil {
+		t.Fatal("expected redirect policy to be configured")
+	}
+	if err := client.CheckRedirect(&http.Request{}, nil); err != http.ErrUseLastResponse {
+		t.Fatalf("expected redirects to be rejected with http.ErrUseLastResponse, got %v", err)
+	}
+}
+
+func TestFetchGitHubActionsOIDCToken_RejectsRedirect(t *testing.T) {
+	redirected := make(chan struct{}, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/collect", http.StatusFound)
+	}))
+	defer source.Close()
+
+	_, err := requestGitHubActionsOIDCToken(context.Background(), source.URL, "must-not-leak", source.Client().Transport)
+	if err == nil {
+		t.Fatal("expected redirect response to be rejected")
+	}
+	select {
+	case <-redirected:
+		t.Fatal("redirect target received the OIDC request")
+	default:
+	}
+}
+
+func TestFetchGitHubActionsOIDCToken_ResponseSizeLimit(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"value":"`+strings.Repeat("x", githubOIDCMaxResponseBytes)+`"}`)
+	}))
+	defer srv.Close()
+
+	_, err := requestGitHubActionsOIDCToken(context.Background(), srv.URL, "token", srv.Client().Transport)
+	if err == nil || !strings.Contains(err.Error(), "response exceeds") {
+		t.Fatalf("expected response-size error, got %v", err)
+	}
+}
+
+func TestValidateGitHubActionsOIDCURL(t *testing.T) {
+	valid := []string{
+		"https://token.actions.githubusercontent.com/?api-version=2.0",
+		"https://github.example.com/_services/token?api-version=2.0",
+		"https://token.actions.github.example.com/oidc",
+	}
+	for _, endpoint := range valid {
+		if err := validateGitHubActionsOIDCURL(endpoint); err != nil {
+			t.Errorf("expected %q to be valid: %v", endpoint, err)
+		}
+	}
+
+	invalid := []string{
+		"http://token.actions.githubusercontent.com/",
+		"//token.actions.githubusercontent.com/",
+		"https:///oidc",
+		"https://user:password@github.example.com/oidc",
+		"https://github.example.com/oidc#fragment",
+	}
+	for _, endpoint := range invalid {
+		if err := validateGitHubActionsOIDCURL(endpoint); err == nil {
+			t.Errorf("expected %q to be rejected", endpoint)
+		}
 	}
 }
 
