@@ -138,6 +138,8 @@ bao-wrapper run [options] -- <command> [args...]
 | `BAO_APP_ID` | `VAULT_APP_ID` | no | AppRole role ID (used when `BAO_TOKEN` and `BAO_JWT_ROLE` are not set) |
 | `BAO_APP_SECRET` | `VAULT_APP_SECRET` | no | AppRole secret ID (used together with `BAO_APP_ID`) |
 | `BAO_CACERT` | `VAULT_CACERT` | no | Path to a PEM-encoded CA certificate file (for self-signed or corporate CA) |
+| `BAO_MAX_RESPONSE_BYTES` | `VAULT_MAX_RESPONSE_BYTES` | no | Maximum OpenBao/Vault response body size in bytes (default: 33554432 / 32 MiB) |
+| `BAO_OIDC_MAX_RESPONSE_BYTES` | `VAULT_OIDC_MAX_RESPONSE_BYTES` | no | Maximum GitHub Actions OIDC response body size in bytes (default: 65536 / 64 KiB) |
 | `BAO_SECRET_PREFIX` | – | no | Prefix for secret variables (default: `SECRET_`); overridden by `--secret-prefix` |
 
 > **Note:** `BAO_*` variables take priority. If a `BAO_*` variable is not set, the corresponding `VAULT_*` variable is used as a fallback for backwards compatibility with existing CI configurations. Authentication methods are tried in this order: `BAO_TOKEN` (direct token) → `BAO_JWT_ROLE`/`BAO_JWT_TOKEN` (JWT/OIDC) → `BAO_APP_ID`/`BAO_APP_SECRET` (AppRole). `BAO_AUTH_PATH` applies to whichever login method is selected; it is ignored when a direct token is used.
@@ -424,7 +426,7 @@ flowchart TD
 ## Security notes
 
 - TLS certificate validation is always enabled (`InsecureSkipVerify` is never set).
-- Vault and GitHub OIDC HTTP clients have an explicit 10-second timeout and reject redirects. GitHub OIDC endpoints must use HTTPS, and their response bodies are limited to 64 KiB.
+- Vault and GitHub OIDC HTTP clients have an explicit 10-second timeout and reject redirects. GitHub OIDC endpoints must use HTTPS. Vault response bodies are limited to 32 MiB and GitHub OIDC response bodies to 64 KiB by default; both limits are configurable with the environment variables documented above.
 - Configured authentication mounts remain below `/v1/auth/`; absolute, non-canonical, encoded, query, and fragment paths are rejected before a login request is sent.
 - Secret reads and token revocation are retried up to 3 times on network errors or HTTP 502/503/504, using exponential backoff and jitter. JWT and AppRole login requests are attempted exactly once because retrying an ambiguously completed login could issue an untracked token.
 - Authentication roles should enforce short token TTLs and maximum TTLs: a lost login response can leave the outcome unknowable even without an automatic retry.

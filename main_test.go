@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"math"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -119,6 +120,64 @@ func TestGetEnvWithFallback(t *testing.T) {
 	})
 }
 
+func TestResponseSizeLimitFromEnv(t *testing.T) {
+	const (
+		primary      = "BAO_TEST_MAX_RESPONSE_BYTES"
+		fallback     = "VAULT_TEST_MAX_RESPONSE_BYTES"
+		defaultLimit = int64(4096)
+	)
+
+	t.Run("default", func(t *testing.T) {
+		t.Setenv(primary, "")
+		t.Setenv(fallback, "")
+
+		got, err := responseSizeLimitFromEnv(primary, fallback, defaultLimit)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != defaultLimit {
+			t.Fatalf("expected default %d, got %d", defaultLimit, got)
+		}
+	})
+
+	t.Run("fallback", func(t *testing.T) {
+		t.Setenv(primary, "")
+		t.Setenv(fallback, "2048")
+
+		got, err := responseSizeLimitFromEnv(primary, fallback, defaultLimit)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != 2048 {
+			t.Fatalf("expected fallback limit 2048, got %d", got)
+		}
+	})
+
+	t.Run("primary wins", func(t *testing.T) {
+		t.Setenv(primary, "1024")
+		t.Setenv(fallback, "2048")
+
+		got, err := responseSizeLimitFromEnv(primary, fallback, defaultLimit)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != 1024 {
+			t.Fatalf("expected primary limit 1024, got %d", got)
+		}
+	})
+
+	for _, value := range []string{"not-a-number", "-1", "0", "9223372036854775807"} {
+		t.Run("rejects "+value, func(t *testing.T) {
+			t.Setenv(primary, value)
+			t.Setenv(fallback, "")
+
+			if _, err := responseSizeLimitFromEnv(primary, fallback, defaultLimit); err == nil {
+				t.Fatalf("expected %q to be rejected", value)
+			}
+		})
+	}
+}
+
 func TestBuildTLSTransport_NoCert(t *testing.T) {
 	t.Setenv("BAO_CACERT", "")
 	t.Setenv("VAULT_CACERT", "")
@@ -212,6 +271,18 @@ func TestFetchGitHubActionsOIDCToken_MissingToken(t *testing.T) {
 	}
 	if jwt != "" {
 		t.Errorf("expected empty string when request token is absent, got %q", jwt)
+	}
+}
+
+func TestFetchGitHubActionsOIDCToken_InvalidResponseSizeLimit(t *testing.T) {
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://example.com/oidc")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "request-token")
+	t.Setenv("BAO_OIDC_MAX_RESPONSE_BYTES", "0")
+	t.Setenv("VAULT_OIDC_MAX_RESPONSE_BYTES", "")
+
+	_, err := fetchGitHubActionsOIDCToken(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "BAO_OIDC_MAX_RESPONSE_BYTES") {
+		t.Fatalf("expected invalid response-size configuration error, got %v", err)
 	}
 }
 
@@ -331,6 +402,47 @@ func TestFetchGitHubActionsOIDCToken_ResponseSizeLimit(t *testing.T) {
 	}
 }
 
+func TestFetchGitHubActionsOIDCToken_ConfiguredResponseSizeLimit(t *testing.T) {
+	responseBody := []byte(`{"value":"configured-token"}`)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Force a chunked response to exercise the streaming limit instead of
+		// the Content-Length fast path.
+		w.(http.Flusher).Flush()
+		_, _ = w.Write(responseBody)
+	}))
+	defer srv.Close()
+
+	token, err := requestGitHubActionsOIDCTokenWithLimit(
+		context.Background(), srv.URL, "request-token", srv.Client().Transport, int64(len(responseBody)),
+	)
+	if err != nil {
+		t.Fatalf("expected exact-limit response to succeed: %v", err)
+	}
+	if token != "configured-token" {
+		t.Fatalf("expected configured-token, got %q", token)
+	}
+
+	_, err = requestGitHubActionsOIDCTokenWithLimit(
+		context.Background(), srv.URL, "request-token", srv.Client().Transport, int64(len(responseBody)-1),
+	)
+	if err == nil || !strings.Contains(err.Error(), "response exceeds") {
+		t.Fatalf("expected response-size error, got %v", err)
+	}
+}
+
+func TestFetchGitHubActionsOIDCToken_RejectsInvalidExplicitLimits(t *testing.T) {
+	for _, limit := range []int64{-1, 0, math.MaxInt64} {
+		_, err := requestGitHubActionsOIDCTokenWithLimit(
+			context.Background(), "https://example.com/oidc", "request-token", nil, limit,
+		)
+		if err == nil {
+			t.Fatalf("expected limit %d to be rejected", limit)
+		}
+	}
+}
+
 func TestValidateGitHubActionsOIDCURL(t *testing.T) {
 	valid := []string{
 		"https://token.actions.githubusercontent.com/?api-version=2.0",
@@ -410,6 +522,48 @@ func TestRunBaoToken_DirectToken(t *testing.T) {
 	}
 	if revokeCalls != 1 {
 		t.Errorf("expected token to be revoked exactly once, got %d calls", revokeCalls)
+	}
+}
+
+func TestRun_ConfiguresVaultResponseSizeLimit(t *testing.T) {
+	secretRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/kv/data/myapp/db":
+			secretRequests++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":{"data":{"password":"response-over-configured-limit"}}}`)
+		case "/v1/auth/token/revoke-self":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("BAO_ADDR", srv.URL)
+	t.Setenv("VAULT_ADDR", "")
+	t.Setenv("BAO_TOKEN", "direct-token")
+	t.Setenv("VAULT_TOKEN", "")
+	t.Setenv("BAO_JWT_ROLE", "")
+	t.Setenv("BAO_JWT_TOKEN", "")
+	t.Setenv("BAO_APP_ID", "")
+	t.Setenv("BAO_APP_SECRET", "")
+	t.Setenv("BAO_NAMESPACE", "")
+	t.Setenv("BAO_CACERT", "")
+	t.Setenv("VAULT_CACERT", "")
+	t.Setenv("BAO_MAX_RESPONSE_BYTES", "32")
+	t.Setenv("VAULT_MAX_RESPONSE_BYTES", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+	t.Setenv("RESPONSE_LIMIT_TEST_SECRET", "kv://password@kv/myapp/db")
+
+	code := run([]string{"run", "--secret-prefix", "RESPONSE_LIMIT_TEST_", "--", "must-not-start"})
+	if code != 1 {
+		t.Fatalf("expected oversized Vault response to fail the run, got exit code %d", code)
+	}
+	if secretRequests != 1 {
+		t.Fatalf("expected one secret request, got %d", secretRequests)
 	}
 }
 

@@ -10,16 +10,18 @@ import (
 
 type transientRetriesKey struct{}
 
-// withTransientRetries opts a single request into the retry transport. Retry
-// is deliberately disabled by default so operations that can create new
-// credentials, such as login, are never repeated transparently.
-func withTransientRetries(ctx context.Context) context.Context {
-	return context.WithValue(ctx, transientRetriesKey{}, true)
+// withTransientRetries opts a single request into the retry transport and
+// carries the response-size limit that must also apply while retryable
+// responses are drained. Retry is deliberately disabled by default so
+// operations that can create new credentials, such as login, are never
+// repeated transparently.
+func withTransientRetries(ctx context.Context, maxResponseBytes int64) context.Context {
+	return context.WithValue(ctx, transientRetriesKey{}, maxResponseBytes)
 }
 
-func transientRetriesEnabled(ctx context.Context) bool {
-	enabled, _ := ctx.Value(transientRetriesKey{}).(bool)
-	return enabled
+func transientRetryResponseLimit(ctx context.Context) (int64, bool) {
+	maxResponseBytes, enabled := ctx.Value(transientRetriesKey{}).(int64)
+	return maxResponseBytes, enabled
 }
 
 const (
@@ -64,7 +66,8 @@ func (t *retryTransport) doSleep(d time.Duration) {
 // transient failures. The request body is reset via req.GetBody before each
 // retry (http.NewRequest sets GetBody automatically for *bytes.Reader bodies).
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if !transientRetriesEnabled(req.Context()) {
+	maxResponseBytes, retriesEnabled := transientRetryResponseLimit(req.Context())
+	if !retriesEnabled {
 		return t.base.RoundTrip(req)
 	}
 
@@ -108,9 +111,12 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 
 		if isRetryableStatus(resp.StatusCode) {
-			// Drain and close the body to free the connection, then retry.
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
+			// Drain at most the configured response limit plus one detection
+			// byte. An oversized transient response aborts the retry sequence;
+			// otherwise a later small success could hide the violation.
+			if err := drainRetryResponse(resp, maxResponseBytes); err != nil {
+				return nil, err
+			}
 			resp = nil
 			continue
 		}
@@ -120,4 +126,20 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	return resp, err
+}
+
+func drainRetryResponse(resp *http.Response, maxResponseBytes int64) error {
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.ContentLength > maxResponseBytes {
+		return &responseTooLargeError{limit: maxResponseBytes}
+	}
+
+	written, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes+1))
+	if written > maxResponseBytes {
+		return &responseTooLargeError{limit: maxResponseBytes}
+	}
+	return nil
 }

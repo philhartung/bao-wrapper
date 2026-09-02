@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -139,6 +141,15 @@ func run(args []string) int {
 	vaultJWT := getEnvWithFallback("BAO_JWT_TOKEN", "VAULT_JWT_TOKEN")
 	vaultRoleID := getEnvWithFallback("BAO_APP_ID", "VAULT_APP_ID")
 	vaultSecretID := getEnvWithFallback("BAO_APP_SECRET", "VAULT_APP_SECRET")
+	vaultMaxResponseBytes, err := responseSizeLimitFromEnv(
+		"BAO_MAX_RESPONSE_BYTES",
+		"VAULT_MAX_RESPONSE_BYTES",
+		api.DefaultMaxResponseBytes,
+	)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
 
 	// Apply custom CA certificate when configured.
 	transport, err := buildTLSTransport()
@@ -147,6 +158,10 @@ func run(args []string) int {
 		return 1
 	}
 	client := api.NewWithTransport(vaultAddr, vaultNamespace, transport)
+	if err := client.SetMaxResponseBytes(vaultMaxResponseBytes); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
 	client.SetContext(ctx)
 
 	// Authenticate using the first available method in priority order:
@@ -268,6 +283,12 @@ Environment variables:
   BAO_APP_ID         AppRole role ID (optional; used when BAO_TOKEN and BAO_JWT_ROLE are not set; fallback: VAULT_APP_ID)
   BAO_APP_SECRET     AppRole secret ID (optional; used together with BAO_APP_ID; fallback: VAULT_APP_SECRET)
   BAO_CACERT         Path to a PEM-encoded CA certificate file (optional; fallback: VAULT_CACERT)
+  BAO_MAX_RESPONSE_BYTES
+                     Maximum Vault response body size in bytes (optional; default: 33554432;
+                     fallback: VAULT_MAX_RESPONSE_BYTES)
+  BAO_OIDC_MAX_RESPONSE_BYTES
+                     Maximum GitHub OIDC response body size in bytes (optional; default: 65536;
+                     fallback: VAULT_OIDC_MAX_RESPONSE_BYTES)
   BAO_SECRET_PREFIX  Prefix for secret variables (optional; default: SECRET_; overridden by --secret-prefix)
 
 Secret variables (<PREFIX><NAME>=<spec>):
@@ -292,6 +313,21 @@ func getEnvWithFallback(primary, fallback string) string {
 	return os.Getenv(fallback)
 }
 
+// responseSizeLimitFromEnv reads a positive base-10 byte limit. MaxInt64 is
+// excluded because bounded reads consume one extra byte to detect overflow.
+func responseSizeLimitFromEnv(primary, fallback string, defaultLimit int64) (int64, error) {
+	raw := getEnvWithFallback(primary, fallback)
+	if raw == "" {
+		return defaultLimit, nil
+	}
+
+	limit, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || limit <= 0 || limit == math.MaxInt64 {
+		return 0, fmt.Errorf("%s (or %s) must be an integer between 1 and %d bytes", primary, fallback, int64(math.MaxInt64-1))
+	}
+	return limit, nil
+}
+
 // fetchGitHubActionsOIDCToken checks whether the process is running inside a
 // GitHub Actions workflow that has OIDC token permissions configured. When
 // both ACTIONS_ID_TOKEN_REQUEST_URL and ACTIONS_ID_TOKEN_REQUEST_TOKEN are
@@ -304,13 +340,28 @@ func fetchGitHubActionsOIDCToken(ctx context.Context) (string, error) {
 	if requestURL == "" || requestToken == "" {
 		return "", nil
 	}
-	return requestGitHubActionsOIDCToken(ctx, requestURL, requestToken, nil)
+	maxResponseBytes, err := responseSizeLimitFromEnv(
+		"BAO_OIDC_MAX_RESPONSE_BYTES",
+		"VAULT_OIDC_MAX_RESPONSE_BYTES",
+		githubOIDCMaxResponseBytes,
+	)
+	if err != nil {
+		return "", err
+	}
+	return requestGitHubActionsOIDCTokenWithLimit(ctx, requestURL, requestToken, nil, maxResponseBytes)
 }
 
 // requestGitHubActionsOIDCToken requests a token from a validated GitHub OIDC
 // endpoint. transport is nil in production and is injectable only so tests can
 // trust an httptest TLS certificate without weakening endpoint validation.
 func requestGitHubActionsOIDCToken(ctx context.Context, requestURL, requestToken string, transport http.RoundTripper) (string, error) {
+	return requestGitHubActionsOIDCTokenWithLimit(ctx, requestURL, requestToken, transport, githubOIDCMaxResponseBytes)
+}
+
+func requestGitHubActionsOIDCTokenWithLimit(ctx context.Context, requestURL, requestToken string, transport http.RoundTripper, maxResponseBytes int64) (string, error) {
+	if maxResponseBytes <= 0 || maxResponseBytes == math.MaxInt64 {
+		return "", fmt.Errorf("OIDC max response bytes must be between 1 and %d", int64(math.MaxInt64-1))
+	}
 	if err := validateGitHubActionsOIDCURL(requestURL); err != nil {
 		return "", err
 	}
@@ -337,12 +388,15 @@ func requestGitHubActionsOIDCToken(ctx context.Context, requestURL, requestToken
 		return "", fmt.Errorf("OIDC endpoint returned HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, githubOIDCMaxResponseBytes+1))
+	if resp.ContentLength > maxResponseBytes {
+		return "", fmt.Errorf("OIDC response exceeds %d-byte limit", maxResponseBytes)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("read OIDC response: %w", err)
 	}
-	if len(body) > githubOIDCMaxResponseBytes {
-		return "", fmt.Errorf("OIDC response exceeds %d-byte limit", githubOIDCMaxResponseBytes)
+	if int64(len(body)) > maxResponseBytes {
+		return "", fmt.Errorf("OIDC response exceeds %d-byte limit", maxResponseBytes)
 	}
 
 	var payload struct {
