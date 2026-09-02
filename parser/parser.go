@@ -1,6 +1,6 @@
 // Package parser parses SECRET_* environment variables into SecretRef descriptors.
 //
-// Variable format: SECRET_<NAME>=<engine>://[[field][:type]@]path[?key=value&...]
+// Variable format: SECRET_<NAME>=<engine>://[[field][:type]@]path
 //
 // Defaults:
 //   - type    → "env"
@@ -37,8 +37,6 @@ type SecretRef struct {
 	Field string
 	// Type controls env vs file injection.
 	Type SecretType
-	// Args holds optional query parameters (e.g. outfile) parsed from the URL.
-	Args map[string]string
 }
 
 // ParseEnv iterates os.Environ() and returns all SecretRef entries.
@@ -120,7 +118,7 @@ func ValidEngine(engine string) bool {
 
 // parseValue parses the value of a SECRET_* variable.
 //
-// The pseudo-URL format is:  [[engine]://][[field][:type]@]path[?key=value&...]
+// The pseudo-URL format is:  [[engine]://][[field][:type]@]path
 //
 // The value is parsed with net/url.Parse. When no scheme is present a "kv://"
 // prefix is added so that the standard parser can locate the host and path
@@ -128,7 +126,6 @@ func ValidEngine(engine string) bool {
 //   - scheme    → engine  (only when "://" was present in the original value)
 //   - userinfo  → field[:type]  (username = field, password = type)
 //   - host+path → Vault path  (e.g. "myapp" + "/db" → "myapp/db")
-//   - query     → Args map
 func parseValue(name, value string) (SecretRef, error) {
 	ref := SecretRef{
 		EnvName: name,
@@ -139,6 +136,9 @@ func parseValue(name, value string) (SecretRef, error) {
 	u, hasScheme, err := parseURL(value)
 	if err != nil {
 		return ref, err
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return ref, fmt.Errorf("query parameters are not supported")
 	}
 
 	// Engine from explicit scheme only; keep the default when no "://" was given.
@@ -170,14 +170,6 @@ func parseValue(name, value string) (SecretRef, error) {
 	// url.Parse puts the first segment into Host, so joining them gives the
 	// original path (e.g. Hostname()="myapp", Path="/db" → "myapp/db").
 	ref.Path = u.Hostname() + u.Path
-
-	// Query parameters.
-	if q := u.Query(); len(q) > 0 {
-		ref.Args = make(map[string]string, len(q))
-		for k, vals := range q {
-			ref.Args[k] = vals[0]
-		}
-	}
 
 	return ref, nil
 }
@@ -215,15 +207,13 @@ func ParseTemplateSecretURL(raw string) (SecretRef, error) {
 			return SecretRef{}, fmt.Errorf("type selectors are not allowed in templates")
 		}
 	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return SecretRef{}, fmt.Errorf("query arguments are not allowed in templates")
+	}
 
 	ref, err := parseValue("", raw)
 	if err != nil {
 		return ref, err
-	}
-
-	// Reject query arguments.
-	if len(ref.Args) > 0 {
-		return ref, fmt.Errorf("query arguments are not allowed in templates")
 	}
 
 	// Only allow kv and legacy engines.

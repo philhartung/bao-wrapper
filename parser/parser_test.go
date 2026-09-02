@@ -143,7 +143,6 @@ func TestParseValue_TableDriven(t *testing.T) {
 		wantField  string
 		wantType   parser.SecretType
 		wantPath   string
-		wantArgs   map[string]string
 	}{
 		{
 			input:      "kv://password:env@myapp/db",
@@ -180,22 +179,12 @@ func TestParseValue_TableDriven(t *testing.T) {
 			wantType:   parser.TypeEnv,
 			wantPath:   "myapp/db",
 		},
-		// --- new: query-parameter tests ---
 		{
-			input:      "template://tpl:file@kv/config?outfile=.env",
+			input:      "template://tpl:file@kv/config",
 			wantEngine: "template",
 			wantField:  "tpl",
 			wantType:   parser.TypeFile,
 			wantPath:   "kv/config",
-			wantArgs:   map[string]string{"outfile": ".env"},
-		},
-		{
-			input:      "kv://pass:env@db?foo=bar",
-			wantEngine: "kv",
-			wantField:  "pass",
-			wantType:   parser.TypeEnv,
-			wantPath:   "db",
-			wantArgs:   map[string]string{"foo": "bar"},
 		},
 	}
 
@@ -225,15 +214,26 @@ func TestParseValue_TableDriven(t *testing.T) {
 			if ref.Path != tt.wantPath {
 				t.Errorf("path: want %q, got %q", tt.wantPath, ref.Path)
 			}
-			if tt.wantArgs != nil {
-				for k, want := range tt.wantArgs {
-					got, ok := ref.Args[k]
-					if !ok {
-						t.Errorf("args: missing key %q", k)
-					} else if got != want {
-						t.Errorf("args[%s]: want %q, got %q", k, want, got)
-					}
-				}
+		})
+	}
+}
+
+func TestParseEnvRejectsQueryParameters(t *testing.T) {
+	tests := []string{
+		"kv://value:file@kv/config?outfile=config",
+		"kv://value:file@kv/config?outfile=%2Fwritable%2Fsensitive%2Fconfig",
+		"kv://value:file@kv/config?outfile=..%2Fconfig",
+		"kv://value:file@kv/config?outfile=C%3A%5Cconfig",
+		"kv://value:file@kv/config?outfile=%5C%5Cserver%5Cshare%5Cconfig",
+		"kv://value@kv/config?foo=bar",
+		"kv://value@kv/config?",
+	}
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("QUERY_PARAMETER_TEST", value)
+			_, err := parser.ParseEnv("QUERY_PARAMETER_")
+			if err == nil || !strings.Contains(err.Error(), "query parameters are not supported") {
+				t.Fatalf("ParseEnv() error = %v, want unsupported-query error", err)
 			}
 		})
 	}

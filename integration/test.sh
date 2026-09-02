@@ -66,15 +66,6 @@ assert_no_fixture_leaks() {
   done
 }
 
-file_mode() {
-  local path=$1
-  if stat -c '%a' "$path" >/dev/null 2>&1; then
-    stat -c '%a' "$path"
-  else
-    stat -f '%Lp' "$path"
-  fi
-}
-
 new_case_dir() {
   local name=$1
   local dir="$work_dir/$name"
@@ -182,38 +173,39 @@ assert_file_contains "$RUN_STDERR" "mode=production" "stderr template skeleton w
 pass_case "AppRole at custom BAO auth path, KV engines, JSON/scalars, and selective masking"
 
 case_dir=$(new_case_dir file-delivery)
-outfile="$case_dir/generated/config/app.conf"
 run_wrapper "$case_dir" \
   "VAULT_ADDR=$bao_addr" \
   "VAULT_AUTH_PATH=auth/ci-approle" \
   "VAULT_APP_ID=$approle_id" \
   "VAULT_APP_SECRET=$approle_secret" \
   "SECRET_CERT_FILE=kv://certificate:file@kv/integration/app" \
-  "SECRET_APP_CONFIG=template://tpl:file@kv/integration/template?outfile=$outfile" \
+  "SECRET_APP_CONFIG=template://tpl:file@kv/integration/template" \
   -- run -- sh -euc '
     test -z "${VAULT_AUTH_PATH+x}"
     test "$(cat "$CERT_FILE")" = "integration-certificate-material-4e98"
-    if stat -c "%a" "$CERT_FILE" >/dev/null 2>&1; then
-      mode=$(stat -c "%a" "$CERT_FILE")
-    else
-      mode=$(stat -f "%Lp" "$CERT_FILE")
-    fi
-    test "$mode" = "600"
-    printf "%s" "$CERT_FILE" > "$CASE_DIR/temp-secret-path"
-    test "$APP_CONFIG" = "$CASE_DIR/generated/config/app.conf"
     expected="database_password=integration-db-password-7c21
 legacy_token=integration-legacy-token-a913
 mode=production"
     test "$(cat "$APP_CONFIG")" = "$expected"
+    test "$CERT_FILE" != "$APP_CONFIG"
+    for secret_file in "$CERT_FILE" "$APP_CONFIG"; do
+      if stat -c "%a" "$secret_file" >/dev/null 2>&1; then
+        mode=$(stat -c "%a" "$secret_file")
+      else
+        mode=$(stat -f "%Lp" "$secret_file")
+      fi
+      test "$mode" = "600"
+    done
+    printf "%s" "$CERT_FILE" > "$CASE_DIR/temp-cert-path"
+    printf "%s" "$APP_CONFIG" > "$CASE_DIR/temp-config-path"
   '
 assert_eq "$RUN_STATUS" "0" "file delivery scenario returned a nonzero status"
-temp_secret_path=$(<"$case_dir/temp-secret-path")
-[[ ! -e "$temp_secret_path" ]] || fail "temporary secret file was not removed"
-[[ -f "$outfile" ]] || fail "custom outfile did not persist"
-assert_eq "$(file_mode "$outfile")" "600" "custom outfile permissions were not private"
-assert_eq "$(file_mode "$(dirname "$outfile")")" "750" "custom outfile directory permissions were incorrect"
+temp_cert_path=$(<"$case_dir/temp-cert-path")
+temp_config_path=$(<"$case_dir/temp-config-path")
+[[ ! -e "$temp_cert_path" ]] || fail "temporary certificate file was not removed"
+[[ ! -e "$temp_config_path" ]] || fail "temporary template file was not removed"
 assert_no_fixture_leaks "$RUN_STDOUT" "$RUN_STDERR"
-pass_case "VAULT auth-path fallbacks, temporary files, and persistent outfile routing"
+pass_case "VAULT auth-path fallbacks and temporary file delivery"
 
 case_dir=$(new_case_dir prefix-and-sanitization)
 run_wrapper "$case_dir" \
