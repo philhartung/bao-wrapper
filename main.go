@@ -292,7 +292,7 @@ Environment variables:
   BAO_SECRET_PREFIX  Prefix for secret variables (optional; default: SECRET_; overridden by --secret-prefix)
 
 Secret variables (<PREFIX><NAME>=<spec>):
-  Spec format:  <engine>://[[field][:type]@]path[?key=value&...]
+  Spec format:  <engine>://[[field][:type]@]path
   Engines:      kv (KV v2), legacy (KV v1), template
   Defaults:     type=env, field="" (full JSON)
   Note:         An explicit supported engine scheme is required; other values are ignored

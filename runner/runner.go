@@ -111,31 +111,20 @@ func runWithCleanup(
 
 		switch sv.Ref.Type {
 		case parser.TypeFile:
-			// If outfile is set, atomically replace it instead of writing directly
-			// through a potentially attacker-controlled path.
-			var path string
-			if outfile := sv.Ref.Args["outfile"]; outfile != "" {
-				path = outfile
-				if err := writeSecretFile(path, sv.Value); err != nil {
-					_ = finishCleanup()
-					return 1, fmt.Errorf("runner: create secret file: %w", err)
-				}
-			} else {
-				path = filepath.Join(tmpDir, sv.Ref.EnvName)
-				f, err := tmpRoot.OpenFile(sv.Ref.EnvName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-				if err != nil {
-					_ = finishCleanup()
-					return 1, fmt.Errorf("runner: create secret file: %w", err)
-				}
-				if _, err := f.WriteString(sv.Value); err != nil {
-					_ = f.Close()
-					_ = finishCleanup()
-					return 1, fmt.Errorf("runner: write secret file: %w", err)
-				}
-				if err := f.Close(); err != nil {
-					_ = finishCleanup()
-					return 1, fmt.Errorf("runner: close secret file: %w", err)
-				}
+			path := filepath.Join(tmpDir, sv.Ref.EnvName)
+			f, err := tmpRoot.OpenFile(sv.Ref.EnvName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			if err != nil {
+				_ = finishCleanup()
+				return 1, fmt.Errorf("runner: create secret file: %w", err)
+			}
+			if _, err := f.WriteString(sv.Value); err != nil {
+				_ = f.Close()
+				_ = finishCleanup()
+				return 1, fmt.Errorf("runner: write secret file: %w", err)
+			}
+			if err := f.Close(); err != nil {
+				_ = finishCleanup()
+				return 1, fmt.Errorf("runner: close secret file: %w", err)
 			}
 			extraEnv = append(extraEnv, sv.Ref.EnvName+"="+path)
 

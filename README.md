@@ -12,7 +12,6 @@ It fetches secrets at runtime, injects them into the child process's environment
 - [Usage](#usage)
   - [Environment variables](#environment-variables)
   - [Secret variables](#secret-variables)
-  - [Query parameters](#query-parameters)
 - [Template engine](#template-engine)
 - [Examples](#examples)
   - [GitLab CI](#example-gitlab-ci-pipeline)
@@ -31,7 +30,6 @@ It fetches secrets at runtime, injects them into the child process's environment
 | **Real-time log masking** | Chunk-boundary-safe masked writer replaces secrets with `[MASKED]` |
 | **`env` and `file` injection** | Secrets are exposed as env vars or temp files (`0600` on Unix; inherited ACLs on Windows); sensitive config vars are stripped from the child process |
 | **Template engine** | Go `text/template` rendering with in-template `{{ secret "..." }}` lookups and selective masking |
-| **Outfile routing** | Write `type=file` secrets directly to a custom path via `?outfile=` query parameter |
 | **Automatic retry** | Up to 3 retries with exponential backoff on transient server errors (502/503/504) |
 | **No command injection** | Child process launched via `exec.Command`, never via a shell |
 | **Cross-platform** | Linux, macOS (arm64/amd64), Windows (amd64) |
@@ -149,10 +147,10 @@ bao-wrapper run [options] -- <command> [args...]
 Define secrets with the configured prefix (default `SECRET_`) using this format:
 
 ```
-<PREFIX><NAME>=<engine>://[[field][:type]@]path[?key=value&...]
+<PREFIX><NAME>=<engine>://[[field][:type]@]path
 ```
 
-An explicit supported engine scheme is required. Prefixed variables without one are ignored, preventing ambient `SECRET_*` passwords, tokens, or keys from being interpreted as Vault paths. The `field`, `type`, and query parameters remain optional.
+An explicit supported engine scheme is required. Prefixed variables without one are ignored, preventing ambient `SECRET_*` passwords, tokens, or keys from being interpreted as Vault paths. The `field` and `type` remain optional. Query parameters are not supported; the former `outfile` parameter is rejected, and `type=file` always uses an isolated temporary file that is removed after the child exits.
 
 | Component | Default | Description |
 |---|---|---|
@@ -160,7 +158,6 @@ An explicit supported engine scheme is required. Prefixed variables without one 
 | `field` | *(empty)* | Key in the secret data; empty = full JSON. Requires `@` separator. |
 | `type` | `env` | `env` = env var, `file` = temp file path. Specified as `field:type` before `@`. |
 | `path` | *(required)* | Full path to the secret, including the mount point (e.g. `kv/test`, `kvv1/my/secret`) |
-| `?key=value` | *(none)* | Optional query parameters after the path (e.g. `?outfile=./config.json`) |
 
 | Engine | API path used | Description |
 |---|---|---|
@@ -184,29 +181,12 @@ SECRET_TLS_CERT=kv://cert:file@kv/myapp/tls
 # Path only (no field or type — reads full JSON from kv)
 SECRET_KEY=kv://kv/myapp/db
 
-# Write a file secret to a custom path using outfile
-SECRET_DOCKER_CFG=kv://config:file@kv/myapp/docker?outfile=.docker/config.json
-
-# Use the template engine to render a config from a KV-stored template
-SECRET_APP_CFG=template://tpl:file@kv/myapp/config?outfile=app.conf
+# Render a config from a KV-stored template into a temporary file;
+# APP_CFG contains its path
+SECRET_APP_CFG=template://tpl:file@kv/myapp/config
 
 # Legacy KV v1 engine
 SECRET_TOKEN=legacy://token:env@kvv1/my/path
-```
-
-#### Query parameters
-
-Query parameters can be appended to the path portion of a secret URL using standard `?key=value&...` syntax.
-
-**`outfile`** — supported on `type=file` secrets. When set, the secret content is written directly to the specified path instead of a temporary file in the isolated temp directory.
-
-- Parent directories are created automatically (`0750` on Unix; inherited ACLs on Windows).
-- The file is atomically installed from an exclusively created, same-directory temporary file. Its permissions are `0600` on Unix; see the Windows ACL note under [Security notes](#security-notes).
-- Temp-directory files (without `outfile`) still use `O_EXCL` for safety.
-
-```bash
-# Write the rendered output to .docker/config.json
-SECRET_DOCKER_CFG=kv://config:file@kv/myapp/docker?outfile=.docker/config.json
 ```
 
 ---
@@ -228,8 +208,8 @@ Use the `template` engine in the `SECRET_*` variable:
 
 ```bash
 # Render template stored at KV path "kv/myapp/config", field "tpl",
-# write result to app.conf
-SECRET_APP_CFG=template://tpl:file@kv/myapp/config?outfile=app.conf
+# write the result to a temporary file, and expose its path as APP_CFG
+SECRET_APP_CFG=template://tpl:file@kv/myapp/config
 
 # Render template and inject as an env var
 SECRET_APP_CFG=template://tpl@kv/myapp/config
@@ -264,15 +244,15 @@ token = {{ secret "kv://token@kv/myapp/api" }}
 With the declaration:
 
 ```bash
-SECRET_APP_CFG=template://tpl:file@kv/myapp/config?outfile=app.conf
+SECRET_APP_CFG=template://tpl:file@kv/myapp/config
 ```
 
 bao-wrapper will:
 
 1. Fetch the template from `kv/myapp/config` field `tpl`.
 2. Resolve `{{ secret "kv://password@kv/myapp/db" }}` and `{{ secret "kv://token@kv/myapp/api" }}` by fetching each from OpenBao/Vault.
-3. Write the rendered output to `app.conf`.
-4. Expose `APP_CFG=app.conf` in the child process environment.
+3. Write the rendered output to a private file in an isolated temporary directory.
+4. Expose the temporary path in `APP_CFG` in the child process environment and remove it when the child exits.
 
 ### Selective masking
 
@@ -307,8 +287,8 @@ build:
     BAO_JWT_ROLE: "gitlab-ci"
     # Inject the NPM token as an env var
     SECRET_NPM_TOKEN: "kv://npmToken:env@kv/frontend/ci"
-    # Render a Docker config from a KV-stored template and write it to disk
-    SECRET_DOCKER_CFG: "template://tpl:file@kv/ci/docker-config?outfile=.docker/config.json"
+    # Render a Docker config into a temporary file; DOCKER_CFG contains its path
+    SECRET_DOCKER_CFG: "template://tpl:file@kv/ci/docker-config"
   before_script:
     - |
       BAO_WRAPPER_VERSION=v0.3.0
@@ -322,7 +302,7 @@ build:
     - bao-wrapper run -- npm run build
 ```
 
-The child process receives the resolved secret values as environment variables (e.g. `NPM_TOKEN=<actual value>`) while all sensitive configuration variables (`BAO_*`, `VAULT_*`, `SECRET_*` (or the custom prefix), `ACTIONS_ID_TOKEN_REQUEST_*`) are stripped from its environment. If `NPM_TOKEN` is longer than three bytes, an accidental `console.log` printing its exact plaintext value will appear as `[MASKED]` in the job log. The rendered Docker config file at `.docker/config.json` is written with `0600` permissions, and its inner secrets are registered for masking in captured stdout and stderr.
+The child process receives the resolved secret values as environment variables (e.g. `NPM_TOKEN=<actual value>`) while all sensitive configuration variables (`BAO_*`, `VAULT_*`, `SECRET_*` (or the custom prefix), `ACTIONS_ID_TOKEN_REQUEST_*`) are stripped from its environment. If `NPM_TOKEN` is longer than three bytes, an accidental `console.log` printing its exact plaintext value will appear as `[MASKED]` in the job log. `DOCKER_CFG` contains the rendered config's temporary path. The file uses `0600` permissions on Unix, is removed when the child exits, and its inner secrets are registered for masking in captured stdout and stderr.
 
 ---
 
@@ -431,10 +411,9 @@ flowchart TD
 - Secret reads and token revocation are retried up to 3 times on network errors or HTTP 502/503/504, using exponential backoff and jitter. JWT and AppRole login requests are attempted exactly once because retrying an ambiguously completed login could issue an untracked token.
 - Authentication roles should enforce short token TTLs and maximum TTLs: a lost login response can leave the outcome unknowable even without an automatic retry.
 - `BAO_*`, `VAULT_*`, the secret prefix variables (default `SECRET_*`), and `ACTIONS_ID_TOKEN_REQUEST_*` environment variables are stripped from the child process environment to prevent credential leakage.
-- On Unix, file secrets use permission `0600`; outfile directories created by the wrapper use `0750`.
-- Windows does not implement Unix `0600` as an owner-only ACL. File secrets inherit the containing directory's Windows ACL. In particular, a persistent custom outfile is safe only when its parent directory already has an appropriately restrictive ACL; the atomic replacement inherits that parent ACL rather than preserving the replaced file's ACL.
-- Temp-directory files and same-directory outfile staging files use exclusive creation. Outfiles are installed with an atomic rename.
-- Custom outfile parent components are resolved from the filesystem or volume root using directory handles. Symbolic links in the parent path are rejected, as are components changed to a different filesystem object while they are being opened.
+- File secrets are created exclusively with permission `0600` on Unix inside an isolated temporary directory and removed when the child exits or the wrapper receives a shutdown signal.
+- Secret references cannot select a filesystem destination: query parameters, including the former `outfile` parameter, are rejected. This prevents file secrets from replacing persistent files.
+- Windows does not implement Unix `0600` as an owner-only ACL. Temporary files inherit the containing temporary directory's Windows ACL, so the wrapper should run under an appropriately protected account and temporary-directory configuration.
 - Output masking is a defense-in-depth measure against accidental plaintext leakage. Exact occurrences of registered secrets longer than three bytes in the child process's captured stdout and stderr are replaced with `[MASKED]`; secrets of three bytes or fewer are deliberately not masked to prevent over-masking.
 - Masking is not a security boundary and cannot prevent malicious child code from intentionally exfiltrating secrets. Encoded, escaped, transformed, or noncontiguous fragments do not match the plaintext masker, and output sent anywhere other than the captured stdout and stderr bypasses it.
 - Template engine uses selective masking: inner secret values are registered with the masker, while the template skeleton is not.
@@ -485,7 +464,7 @@ or manual bootstrap commands are required.
 The script starts one disposable OpenBao instance, builds the wrapper once, and
 runs isolated scenarios covering AppRole at a custom auth mount and direct-token
 authentication, `BAO_*`/`VAULT_*` fallback and CLI precedence, KV v1/v2 and
-full-JSON reads, environment and file injection, custom outfiles, selective
+full-JSON reads, environment and temporary-file injection, selective
 template masking, custom secret prefixes, credential stripping, child failures,
 temporary-file cleanup, and token revocation. It then removes the container,
 storage volume, and test artifacts. Set `OPENBAO_PORT` if port 8200 is already
@@ -499,7 +478,7 @@ The credentials in `compose.yaml` are public fixtures for local and CI testing
 only. They must never be used in a persistent or production environment.
 
 TLS/custom-CA handling, JWT/OIDC, namespace headers, retry fault injection,
-signal forwarding, symlink attacks, and deterministic masker chunk boundaries
+signal forwarding, query-parameter rejection, and deterministic masker chunk boundaries
 remain in the focused Go test suites, where those failure modes can be exercised
 without adding fragile infrastructure to the OpenBao fixture.
 
