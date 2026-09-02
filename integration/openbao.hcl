@@ -98,7 +98,7 @@ EOT
 
   request "mount_integration_approle" {
     operation = "create"
-    path      = "sys/auth/approle"
+    path      = "sys/auth/ci-approle"
     data = {
       type = "approle"
     }
@@ -106,7 +106,7 @@ EOT
 
   request "create_integration_approle" {
     operation = "create"
-    path      = "auth/approle/role/bao-wrapper-integration"
+    path      = "auth/ci-approle/role/bao-wrapper-integration"
     data = {
       role_id = {
         eval_source    = "env"
@@ -122,7 +122,7 @@ EOT
 
   request "create_integration_secret_id" {
     operation = "update"
-    path      = "auth/approle/role/bao-wrapper-integration/custom-secret-id"
+    path      = "auth/ci-approle/role/bao-wrapper-integration/custom-secret-id"
     data = {
       secret_id = {
         eval_source     = "env"

@@ -673,6 +673,124 @@ func TestRunBaoToken_PriorityOverAppRole(t *testing.T) {
 	}
 }
 
+func TestRun_CustomAuthPath(t *testing.T) {
+	tests := []struct {
+		name          string
+		authMethod    string
+		baoAuthPath   string
+		vaultAuthPath string
+		cliAuthPath   string
+		wantPath      string
+	}{
+		{
+			name:          "BAO_AUTH_PATH wins for JWT",
+			authMethod:    "jwt",
+			baoAuthPath:   "auth/gitlab",
+			vaultAuthPath: "wrong-mount",
+			wantPath:      "/v1/auth/gitlab/login",
+		},
+		{
+			name:          "JWT from VAULT_AUTH_PATH fallback",
+			authMethod:    "jwt",
+			vaultAuthPath: "jwt_v2",
+			wantPath:      "/v1/auth/jwt_v2/login",
+		},
+		{
+			name:          "CLI overrides environment for AppRole",
+			authMethod:    "approle",
+			baoAuthPath:   "wrong-mount",
+			vaultAuthPath: "also-wrong",
+			cliAuthPath:   "auth/ci-approle",
+			wantPath:      "/v1/auth/ci-approle/login",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loginCalls := 0
+			revokeCalls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case tt.wantPath:
+					loginCalls++
+					if r.Method != http.MethodPost {
+						t.Errorf("expected login method POST, got %s", r.Method)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"auth":{"client_token":"custom-auth-token"}}`))
+				case "/v1/auth/token/revoke-self":
+					revokeCalls++
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			t.Setenv("BAO_ADDR", srv.URL)
+			t.Setenv("VAULT_ADDR", "")
+			t.Setenv("BAO_TOKEN", "")
+			t.Setenv("VAULT_TOKEN", "")
+			t.Setenv("BAO_AUTH_PATH", tt.baoAuthPath)
+			t.Setenv("VAULT_AUTH_PATH", tt.vaultAuthPath)
+			t.Setenv("BAO_JWT_ROLE", "")
+			t.Setenv("VAULT_JWT_ROLE", "")
+			t.Setenv("BAO_JWT_TOKEN", "")
+			t.Setenv("VAULT_JWT_TOKEN", "")
+			t.Setenv("BAO_APP_ID", "")
+			t.Setenv("VAULT_APP_ID", "")
+			t.Setenv("BAO_APP_SECRET", "")
+			t.Setenv("VAULT_APP_SECRET", "")
+			t.Setenv("BAO_NAMESPACE", "")
+			t.Setenv("VAULT_NAMESPACE", "")
+			t.Setenv("BAO_CACERT", "")
+			t.Setenv("VAULT_CACERT", "")
+			t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+			t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+			t.Setenv(successfulRunChildHelperEnv, "1")
+
+			switch tt.authMethod {
+			case "jwt":
+				t.Setenv("BAO_JWT_ROLE", "test-role")
+				t.Setenv("BAO_JWT_TOKEN", "test-jwt")
+			case "approle":
+				t.Setenv("BAO_APP_ID", "test-role-id")
+				t.Setenv("BAO_APP_SECRET", "test-secret-id")
+			default:
+				t.Fatalf("unknown test auth method %q", tt.authMethod)
+			}
+
+			args := []string{"run", "--secret-prefix", "AUTH_PATH_TEST_SECRET_"}
+			if tt.cliAuthPath != "" {
+				args = append(args, "--auth-path", tt.cliAuthPath)
+			}
+			args = append(args, "--", os.Args[0], "-test.run=^TestSuccessfulRunChildHelper$")
+
+			if code := run(args); code != 0 {
+				t.Fatalf("expected exit code 0, got %d", code)
+			}
+			if loginCalls != 1 {
+				t.Errorf("expected one login request, got %d", loginCalls)
+			}
+			if revokeCalls != 1 {
+				t.Errorf("expected one token revocation request, got %d", revokeCalls)
+			}
+		})
+	}
+}
+
+func TestRun_AuthPathMissingArg(t *testing.T) {
+	if code := run([]string{"run", "--auth-path", "--", "true"}); code == 0 {
+		t.Error("expected non-zero exit code when --auth-path has no argument")
+	}
+}
+
+func TestRun_AuthPathEmpty(t *testing.T) {
+	if code := run([]string{"run", "--auth-path", "", "--", "true"}); code == 0 {
+		t.Error("expected non-zero exit code when --auth-path is empty")
+	}
+}
+
 func TestRun_CustomSecretPrefix(t *testing.T) {
 	// Verify that --secret-prefix changes which env vars are treated as secrets.
 	secretRead := false

@@ -73,6 +73,14 @@ func (c *Client) SetContext(ctx context.Context) {
 // LoginJWT authenticates with the JWT auth method and stores the resulting
 // client token for subsequent requests.
 func (c *Client) LoginJWT(role, jwt string) error {
+	return c.LoginJWTAt("jwt", role, jwt)
+}
+
+// LoginJWTAt authenticates with a JWT auth method mounted at authPath and
+// stores the resulting client token for subsequent requests. authPath may be
+// a mount name (for example, "gitlab") or an auth-relative path (for example,
+// "auth/gitlab").
+func (c *Client) LoginJWTAt(authPath, role, jwt string) error {
 	body, err := json.Marshal(map[string]string{
 		"role": role,
 		"jwt":  jwt,
@@ -81,7 +89,12 @@ func (c *Client) LoginJWT(role, jwt string) error {
 		return fmt.Errorf("api: marshal login body: %w", err)
 	}
 
-	resp, err := c.post("/v1/auth/jwt/login", body)
+	loginPath, err := authLoginPath(authPath)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.post(loginPath, body)
 	if err != nil {
 		return err
 	}
@@ -104,6 +117,13 @@ func (c *Client) LoginJWT(role, jwt string) error {
 // LoginAppRole authenticates with the AppRole auth method using a role ID and
 // secret ID, and stores the resulting client token for subsequent requests.
 func (c *Client) LoginAppRole(roleID, secretID string) error {
+	return c.LoginAppRoleAt("approle", roleID, secretID)
+}
+
+// LoginAppRoleAt authenticates with an AppRole auth method mounted at authPath
+// using a role ID and secret ID, and stores the resulting client token for
+// subsequent requests. authPath accepts the same formats as LoginJWTAt.
+func (c *Client) LoginAppRoleAt(authPath, roleID, secretID string) error {
 	body, err := json.Marshal(map[string]string{
 		"role_id":   roleID,
 		"secret_id": secretID,
@@ -112,7 +132,12 @@ func (c *Client) LoginAppRole(roleID, secretID string) error {
 		return fmt.Errorf("api: marshal approle login body: %w", err)
 	}
 
-	resp, err := c.post("/v1/auth/approle/login", body)
+	loginPath, err := authLoginPath(authPath)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.post(loginPath, body)
 	if err != nil {
 		return err
 	}
@@ -130,6 +155,30 @@ func (c *Client) LoginAppRole(roleID, secretID string) error {
 	}
 	c.token = result.Auth.ClientToken
 	return nil
+}
+
+// authLoginPath converts an auth mount into its login API endpoint. Keeping
+// the caller-provided value below /v1/auth and rejecting ambiguous URL/path
+// syntax prevents a configurable mount from becoming an arbitrary API call.
+func authLoginPath(authPath string) (string, error) {
+	if authPath == "" || strings.HasPrefix(authPath, "/") {
+		return "", fmt.Errorf("api: auth path must be a non-empty relative path")
+	}
+	if strings.ContainsAny(authPath, `\%?#`) || pathpkg.Clean(authPath) != authPath {
+		return "", fmt.Errorf("api: auth path must be canonical")
+	}
+	for _, segment := range strings.Split(authPath, "/") {
+		if segment == "." || segment == ".." {
+			return "", fmt.Errorf("api: auth path must be canonical")
+		}
+	}
+
+	authPath = strings.TrimPrefix(authPath, "auth/")
+	if authPath == "" {
+		return "", fmt.Errorf("api: auth path must include a mount name")
+	}
+
+	return "/v1/auth/" + authPath + "/login", nil
 }
 
 // ReadSecret fetches a secret from Vault using the KV engine.

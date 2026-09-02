@@ -50,6 +50,80 @@ func TestLoginJWT_Success(t *testing.T) {
 	}
 }
 
+func TestLoginJWTAt_CustomAuthPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		authPath string
+		wantPath string
+	}{
+		{name: "mount name", authPath: "gitlab", wantPath: "/v1/auth/gitlab/login"},
+		{name: "auth-relative path", authPath: "auth/jwt_v2", wantPath: "/v1/auth/jwt_v2/login"},
+		{name: "nested mount", authPath: "team/jwt", wantPath: "/v1/auth/team/jwt/login"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tt.wantPath {
+					t.Errorf("expected path %q, got %q", tt.wantPath, r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"auth":{"client_token":"s.custom"}}`))
+			}))
+			defer srv.Close()
+
+			c := api.New(srv.URL, "")
+			if err := c.LoginJWTAt(tt.authPath, "myrole", "myjwt"); err != nil {
+				t.Fatalf("LoginJWTAt error: %v", err)
+			}
+			if c.Token() != "s.custom" {
+				t.Errorf("expected token s.custom, got %s", c.Token())
+			}
+		})
+	}
+}
+
+func TestLoginAt_RejectsInvalidAuthPath(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	invalid := []string{
+		"",
+		"/auth/jwt",
+		"auth/",
+		"auth//jwt",
+		"auth/../jwt",
+		"../jwt",
+		".",
+		"..",
+		"jwt/",
+		`jwt\login`,
+		"jwt%2flogin",
+		"jwt?redirect=evil",
+		"jwt#fragment",
+	}
+
+	for _, authPath := range invalid {
+		t.Run(authPath, func(t *testing.T) {
+			c := api.New(srv.URL, "")
+			if err := c.LoginJWTAt(authPath, "role", "jwt"); err == nil {
+				t.Fatal("expected invalid auth path to be rejected")
+			}
+			if c.Token() != "" {
+				t.Error("invalid auth path must not store a token")
+			}
+		})
+	}
+
+	if requests != 0 {
+		t.Fatalf("invalid auth paths caused %d HTTP requests", requests)
+	}
+}
+
 func TestLoginJWT_MissingToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -117,6 +191,25 @@ func TestLoginAppRole_Success(t *testing.T) {
 	}
 	if c.Token() != "s.approletoken" {
 		t.Errorf("expected token s.approletoken, got %s", c.Token())
+	}
+}
+
+func TestLoginAppRoleAt_CustomAuthPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/ci-approle/login" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"auth":{"client_token":"s.custom-approle"}}`))
+	}))
+	defer srv.Close()
+
+	c := api.New(srv.URL, "")
+	if err := c.LoginAppRoleAt("auth/ci-approle", "myroleid", "mysecretid"); err != nil {
+		t.Fatalf("LoginAppRoleAt error: %v", err)
+	}
+	if c.Token() != "s.custom-approle" {
+		t.Errorf("expected token s.custom-approle, got %s", c.Token())
 	}
 }
 

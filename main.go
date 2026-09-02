@@ -81,16 +81,28 @@ func run(args []string) int {
 	}
 	cmdArgs := args[cmdStart:]
 
-	// Parse options between "run" and "--".
-	// The default prefix can be overridden by BAO_SECRET_PREFIX; the CLI flag
-	// --secret-prefix takes priority over the environment variable.
+	// Parse options between "run" and "--". CLI flags take priority over their
+	// corresponding environment variables.
 	secretPrefix := "SECRET_"
 	if envPrefix := os.Getenv("BAO_SECRET_PREFIX"); envPrefix != "" {
 		secretPrefix = envPrefix
 	}
+	authPath := getEnvWithFallback("BAO_AUTH_PATH", "VAULT_AUTH_PATH")
 	runOpts := args[1 : cmdStart-1]
 	for i := 0; i < len(runOpts); i++ {
 		switch runOpts[i] {
+		case "--auth-path":
+			if i+1 >= len(runOpts) {
+				fmt.Fprintln(os.Stderr, "error: --auth-path requires a value")
+				printUsage()
+				return 1
+			}
+			authPath = runOpts[i+1]
+			if authPath == "" {
+				fmt.Fprintln(os.Stderr, "error: auth path (--auth-path) must not be empty")
+				return 1
+			}
+			i++
 		case "--secret-prefix":
 			if i+1 >= len(runOpts) {
 				fmt.Fprintln(os.Stderr, "error: --secret-prefix requires a value")
@@ -156,14 +168,22 @@ func run(args []string) int {
 			vaultJWT = jwt
 		}
 		if vaultJWT != "" {
-			if err := client.LoginJWT(vaultRole, vaultJWT); err != nil {
+			jwtAuthPath := authPath
+			if jwtAuthPath == "" {
+				jwtAuthPath = "jwt"
+			}
+			if err := client.LoginJWTAt(jwtAuthPath, vaultRole, vaultJWT); err != nil {
 				fmt.Fprintln(os.Stderr, "error: vault login failed:", err)
 				return 1
 			}
 			tokenAcquired = true
 		}
 	case vaultRoleID != "" && vaultSecretID != "":
-		if err := client.LoginAppRole(vaultRoleID, vaultSecretID); err != nil {
+		appRoleAuthPath := authPath
+		if appRoleAuthPath == "" {
+			appRoleAuthPath = "approle"
+		}
+		if err := client.LoginAppRoleAt(appRoleAuthPath, vaultRoleID, vaultSecretID); err != nil {
 			fmt.Fprintln(os.Stderr, "error: vault approle login failed:", err)
 			return 1
 		}
@@ -232,12 +252,16 @@ Usage:
   bao-wrapper run [options] -- <command> [args...]
 
 Options (bao-wrapper run):
+  --auth-path <path>         Authentication mount, e.g. gitlab or auth/gitlab
+                             (env: BAO_AUTH_PATH; fallback: VAULT_AUTH_PATH)
   --secret-prefix <prefix>   Prefix used to identify secret variables (default: SECRET_; env: BAO_SECRET_PREFIX)
 
 Environment variables:
   BAO_ADDR           OpenBao/Vault server address (required; fallback: VAULT_ADDR)
   BAO_NAMESPACE      Vault namespace (optional; fallback: VAULT_NAMESPACE)
   BAO_TOKEN          Direct client token (optional; takes priority over all login methods; fallback: VAULT_TOKEN)
+  BAO_AUTH_PATH      JWT or AppRole auth mount (optional; fallback: VAULT_AUTH_PATH;
+                     defaults to jwt for JWT and approle for AppRole; overridden by --auth-path)
   BAO_JWT_ROLE       JWT auth role (optional; used when BAO_TOKEN is not set; fallback: VAULT_JWT_ROLE)
   BAO_JWT_TOKEN      JWT token for authentication (optional; fallback: VAULT_JWT_TOKEN;
                      auto-detected from GitHub Actions OIDC when unset)
