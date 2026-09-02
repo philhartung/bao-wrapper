@@ -122,6 +122,7 @@ bao-wrapper run [options] -- <command> [args...]
 
 | Flag | Default | Description |
 |---|---|---|
+| `--auth-path <path>` | `jwt` for JWT; `approle` for AppRole | Authentication mount used by the selected login method. Accepts a mount name such as `gitlab` or an auth-relative path such as `auth/gitlab`; `/login` is appended automatically. Can also be set via `BAO_AUTH_PATH` (fallback: `VAULT_AUTH_PATH`); the CLI flag takes priority. |
 | `--secret-prefix <prefix>` | `SECRET_` | Prefix used to identify secret environment variables. Variables whose name starts with this prefix are parsed as secret references; the prefix is stripped before injecting the value into the child process. Can also be set via the `BAO_SECRET_PREFIX` environment variable; the CLI flag takes priority. |
 
 ### Environment variables
@@ -131,6 +132,7 @@ bao-wrapper run [options] -- <command> [args...]
 | `BAO_ADDR` | `VAULT_ADDR` | **yes** | OpenBao/Vault server URL (e.g. `https://openbao.example.com`) |
 | `BAO_NAMESPACE` | `VAULT_NAMESPACE` | no | Namespace |
 | `BAO_TOKEN` | `VAULT_TOKEN` | no | Direct client token; takes priority over all login methods. Use when a token is already available (e.g. local dev, pre-issued tokens). **The token is revoked on exit** (normal exit, error, or SIGINT/SIGTERM) and cannot be reused afterwards, so do not supply a long-lived or shared static token that must survive multiple runs or jobs. |
+| `BAO_AUTH_PATH` | `VAULT_AUTH_PATH` | no | Authentication mount used for JWT or AppRole login. Accepts `gitlab` and `auth/gitlab` forms. Defaults to `jwt` for JWT and `approle` for AppRole; overridden by `--auth-path`. |
 | `BAO_JWT_ROLE` | `VAULT_JWT_ROLE` | no | JWT auth role (used when `BAO_TOKEN` is not set; skips JWT login when omitted) |
 | `BAO_JWT_TOKEN` | `VAULT_JWT_TOKEN` | no | JWT token for authentication (auto-detected from GitHub Actions OIDC when unset) |
 | `BAO_APP_ID` | `VAULT_APP_ID` | no | AppRole role ID (used when `BAO_TOKEN` and `BAO_JWT_ROLE` are not set) |
@@ -138,7 +140,7 @@ bao-wrapper run [options] -- <command> [args...]
 | `BAO_CACERT` | `VAULT_CACERT` | no | Path to a PEM-encoded CA certificate file (for self-signed or corporate CA) |
 | `BAO_SECRET_PREFIX` | – | no | Prefix for secret variables (default: `SECRET_`); overridden by `--secret-prefix` |
 
-> **Note:** `BAO_*` variables take priority. If a `BAO_*` variable is not set, the corresponding `VAULT_*` variable is used as a fallback for backwards compatibility with existing CI configurations. Authentication methods are tried in this order: `BAO_TOKEN` (direct token) → `BAO_JWT_ROLE`/`BAO_JWT_TOKEN` (JWT/OIDC) → `BAO_APP_ID`/`BAO_APP_SECRET` (AppRole).
+> **Note:** `BAO_*` variables take priority. If a `BAO_*` variable is not set, the corresponding `VAULT_*` variable is used as a fallback for backwards compatibility with existing CI configurations. Authentication methods are tried in this order: `BAO_TOKEN` (direct token) → `BAO_JWT_ROLE`/`BAO_JWT_TOKEN` (JWT/OIDC) → `BAO_APP_ID`/`BAO_APP_SECRET` (AppRole). `BAO_AUTH_PATH` applies to whichever login method is selected; it is ignored when a direct token is used.
 
 ### Secret variables
 
@@ -299,6 +301,7 @@ build:
   variables:
     BAO_ADDR: "https://vault.example.com"
     BAO_NAMESPACE: "mynamespace"
+    BAO_AUTH_PATH: "gitlab" # JWT method mounted at auth/gitlab
     BAO_JWT_ROLE: "gitlab-ci"
     # Inject the NPM token as an env var
     SECRET_NPM_TOKEN: "kv://npmToken:env@kv/frontend/ci"
@@ -373,6 +376,7 @@ For non-interactive environments where JWT/OIDC is not available, you can use Ap
 export BAO_ADDR="https://vault.example.com"
 export BAO_APP_ID="my-role-id"
 export BAO_APP_SECRET="my-secret-id"
+# export BAO_AUTH_PATH="ci-approle" # if AppRole is mounted at auth/ci-approle
 
 # Inject secrets from KV
 export SECRET_API_KEY="kv://apiKey@kv/services/api"
@@ -421,6 +425,7 @@ flowchart TD
 
 - TLS certificate validation is always enabled (`InsecureSkipVerify` is never set).
 - Vault and GitHub OIDC HTTP clients have an explicit 10-second timeout and reject redirects. GitHub OIDC endpoints must use HTTPS, and their response bodies are limited to 64 KiB.
+- Configured authentication mounts remain below `/v1/auth/`; absolute, non-canonical, encoded, query, and fragment paths are rejected before a login request is sent.
 - Secret reads and token revocation are retried up to 3 times on network errors or HTTP 502/503/504, using exponential backoff and jitter. JWT and AppRole login requests are attempted exactly once because retrying an ambiguously completed login could issue an untracked token.
 - Authentication roles should enforce short token TTLs and maximum TTLs: a lost login response can leave the outcome unknowable even without an automatic retry.
 - `BAO_*`, `VAULT_*`, the secret prefix variables (default `SECRET_*`), and `ACTIONS_ID_TOKEN_REQUEST_*` environment variables are stripped from the child process environment to prevent credential leakage.
@@ -476,12 +481,13 @@ or manual bootstrap commands are required.
 ```
 
 The script starts one disposable OpenBao instance, builds the wrapper once, and
-runs isolated scenarios covering AppRole and direct-token authentication,
-`BAO_*`/`VAULT_*` fallback behavior, KV v1/v2 and full-JSON reads, environment
-and file injection, custom outfiles, selective template masking, custom secret
-prefixes, credential stripping, child failures, temporary-file cleanup, and
-token revocation. It then removes the container, storage volume, and test
-artifacts. Set `OPENBAO_PORT` if port 8200 is already in use:
+runs isolated scenarios covering AppRole at a custom auth mount and direct-token
+authentication, `BAO_*`/`VAULT_*` fallback and CLI precedence, KV v1/v2 and
+full-JSON reads, environment and file injection, custom outfiles, selective
+template masking, custom secret prefixes, credential stripping, child failures,
+temporary-file cleanup, and token revocation. It then removes the container,
+storage volume, and test artifacts. Set `OPENBAO_PORT` if port 8200 is already
+in use:
 
 ```bash
 OPENBAO_PORT=18200 ./integration/test.sh

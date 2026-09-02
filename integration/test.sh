@@ -117,7 +117,7 @@ pass_case() {
 issue_token() {
   docker compose exec -T \
     -e BAO_ADDR=http://127.0.0.1:8200 \
-    openbao bao write -field=token auth/approle/login \
+    openbao bao write -field=token auth/ci-approle/login \
     "role_id=$approle_id" "secret_id=$approle_secret"
 }
 
@@ -148,6 +148,7 @@ go build -o "$binary" .
 case_dir=$(new_case_dir engines-and-masking)
 run_wrapper "$case_dir" \
   "BAO_ADDR=$bao_addr" \
+  "BAO_AUTH_PATH=ci-approle" \
   "BAO_APP_ID=$approle_id" \
   "BAO_APP_SECRET=$approle_secret" \
   "SECRET_DB_PASSWORD=kv://password@kv/integration/app" \
@@ -178,17 +179,19 @@ assert_file_contains "$RUN_STDOUT" "database_password=[MASKED]" "template KV v2 
 assert_file_contains "$RUN_STDOUT" "legacy_token=[MASKED]" "template KV v1 secret was not selectively masked"
 assert_file_contains "$RUN_STDOUT" "mode=production" "template skeleton was unexpectedly masked"
 assert_file_contains "$RUN_STDERR" "mode=production" "stderr template skeleton was unexpectedly masked"
-pass_case "AppRole, KV engines, JSON/scalars, and selective masking"
+pass_case "AppRole at custom BAO auth path, KV engines, JSON/scalars, and selective masking"
 
 case_dir=$(new_case_dir file-delivery)
 outfile="$case_dir/generated/config/app.conf"
 run_wrapper "$case_dir" \
   "VAULT_ADDR=$bao_addr" \
+  "VAULT_AUTH_PATH=auth/ci-approle" \
   "VAULT_APP_ID=$approle_id" \
   "VAULT_APP_SECRET=$approle_secret" \
   "SECRET_CERT_FILE=kv://certificate:file@kv/integration/app" \
   "SECRET_APP_CONFIG=template://tpl:file@kv/integration/template?outfile=$outfile" \
   -- run -- sh -euc '
+    test -z "${VAULT_AUTH_PATH+x}"
     test "$(cat "$CERT_FILE")" = "integration-certificate-material-4e98"
     if stat -c "%a" "$CERT_FILE" >/dev/null 2>&1; then
       mode=$(stat -c "%a" "$CERT_FILE")
@@ -210,11 +213,12 @@ temp_secret_path=$(<"$case_dir/temp-secret-path")
 assert_eq "$(file_mode "$outfile")" "600" "custom outfile permissions were not private"
 assert_eq "$(file_mode "$(dirname "$outfile")")" "750" "custom outfile directory permissions were incorrect"
 assert_no_fixture_leaks "$RUN_STDOUT" "$RUN_STDERR"
-pass_case "VAULT fallbacks, temporary files, and persistent outfile routing"
+pass_case "VAULT auth-path fallbacks, temporary files, and persistent outfile routing"
 
 case_dir=$(new_case_dir prefix-and-sanitization)
 run_wrapper "$case_dir" \
   "BAO_ADDR=$bao_addr" \
+  "BAO_AUTH_PATH=ignored-mount" \
   "BAO_APP_ID=$approle_id" \
   "BAO_APP_SECRET=$approle_secret" \
   "BAO_SECRET_PREFIX=IGNORED_" \
@@ -225,11 +229,12 @@ run_wrapper "$case_dir" \
   "WRAP_DB_PASSWORD=kv://password@kv/integration/app" \
   "WRAP_SCANNING_URL=https://scanner.invalid" \
   "SAFE_PASSTHROUGH=visible" \
-  -- run --secret-prefix WRAP_ -- sh -euc '
+  -- run --auth-path auth/ci-approle --secret-prefix WRAP_ -- sh -euc '
     test "$DB_PASSWORD" = "integration-db-password-7c21"
     test "$SAFE_PASSTHROUGH" = "visible"
     test -z "${SCANNING_URL+x}"
     test -z "${BAO_ADDR+x}"
+    test -z "${BAO_AUTH_PATH+x}"
     test -z "${BAO_APP_ID+x}"
     test -z "${BAO_APP_SECRET+x}"
     test -z "${BAO_SECRET_PREFIX+x}"
@@ -244,7 +249,7 @@ run_wrapper "$case_dir" \
 assert_eq "$RUN_STATUS" "0" "custom prefix scenario returned a nonzero status"
 assert_no_fixture_leaks "$RUN_STDOUT" "$RUN_STDERR"
 assert_file_contains "$RUN_STDOUT" "custom-prefix=[MASKED]" "custom-prefix secret was not masked"
-pass_case "custom prefix precedence, scheme skipping, and environment sanitization"
+pass_case "CLI auth-path and custom-prefix precedence, scheme skipping, and environment sanitization"
 
 case_dir=$(new_case_dir child-failure)
 direct_token=$(issue_token)
