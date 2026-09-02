@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	pathpkg "path"
 	"strings"
@@ -17,6 +19,9 @@ import (
 const (
 	httpTimeout    = 10 * time.Second
 	cleanupTimeout = 5 * time.Second
+	// DefaultMaxResponseBytes is the default maximum size of a response body
+	// read from Vault/OpenBao.
+	DefaultMaxResponseBytes = 32 << 20
 )
 
 var reservedLegacyPathPrefixes = map[string]struct{}{
@@ -26,13 +31,22 @@ var reservedLegacyPathPrefixes = map[string]struct{}{
 	"sys":       {},
 }
 
+type responseTooLargeError struct {
+	limit int64
+}
+
+func (e *responseTooLargeError) Error() string {
+	return fmt.Sprintf("api: response body exceeds %d-byte limit", e.limit)
+}
+
 // Client is a minimal Vault/OpenBao REST client.
 type Client struct {
-	addr      string
-	namespace string
-	token     string
-	http      *http.Client
-	ctx       context.Context
+	addr             string
+	namespace        string
+	token            string
+	http             *http.Client
+	ctx              context.Context
+	maxResponseBytes int64
 }
 
 // New creates a new Client using the default HTTP transport. namespace may be empty.
@@ -59,7 +73,8 @@ func NewWithTransport(addr, namespace string, base http.RoundTripper) *Client {
 				return http.ErrUseLastResponse
 			},
 		},
-		ctx: context.Background(),
+		ctx:              context.Background(),
+		maxResponseBytes: DefaultMaxResponseBytes,
 	}
 }
 
@@ -68,6 +83,17 @@ func NewWithTransport(addr, namespace string, base http.RoundTripper) *Client {
 // graceful cancellation on OS signals.
 func (c *Client) SetContext(ctx context.Context) {
 	c.ctx = ctx
+}
+
+// SetMaxResponseBytes sets the largest Vault/OpenBao response body the client
+// will read into memory. It must be called before requests are made. The limit
+// must leave room for the extra byte used to detect an oversized response.
+func (c *Client) SetMaxResponseBytes(limit int64) error {
+	if limit <= 0 || limit == math.MaxInt64 {
+		return fmt.Errorf("api: max response bytes must be between 1 and %d", int64(math.MaxInt64-1))
+	}
+	c.maxResponseBytes = limit
+	return nil
 }
 
 // LoginJWT authenticates with the JWT auth method and stores the resulting
@@ -321,6 +347,13 @@ func (c *Client) effectiveCtx() context.Context {
 	return context.Background()
 }
 
+func (c *Client) responseSizeLimit() int64 {
+	if c.maxResponseBytes <= 0 || c.maxResponseBytes == math.MaxInt64 {
+		return DefaultMaxResponseBytes
+	}
+	return c.maxResponseBytes
+}
+
 // ---------- internal helpers ----------
 
 func (c *Client) doWithContext(ctx context.Context, method, path string, body []byte) ([]byte, error) {
@@ -346,6 +379,10 @@ func (c *Client) doWithContext(ctx context.Context, method, path string, body []
 
 	res, err := c.http.Do(req)
 	if err != nil {
+		var sizeErr *responseTooLargeError
+		if errors.As(err, &sizeErr) {
+			return nil, sizeErr
+		}
 		// net/http transport errors commonly embed the complete request URL.
 		// Preserve cancellation semantics without exposing configured values.
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -357,9 +394,17 @@ func (c *Client) doWithContext(ctx context.Context, method, path string, body []
 		_ = res.Body.Close()
 	}()
 
-	resBody, err := io.ReadAll(res.Body)
+	maxResponseBytes := c.responseSizeLimit()
+	if res.ContentLength > maxResponseBytes {
+		return nil, &responseTooLargeError{limit: maxResponseBytes}
+	}
+
+	resBody, err := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("api: read response body: %w", err)
+	}
+	if int64(len(resBody)) > maxResponseBytes {
+		return nil, &responseTooLargeError{limit: maxResponseBytes}
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
@@ -374,7 +419,7 @@ func (c *Client) do(method, path string, body []byte) ([]byte, error) {
 }
 
 func (c *Client) doWithTransientRetries(ctx context.Context, method, path string, body []byte) ([]byte, error) {
-	return c.doWithContext(withTransientRetries(ctx), method, path, body)
+	return c.doWithContext(withTransientRetries(ctx, c.responseSizeLimit()), method, path, body)
 }
 
 func (c *Client) get(path string) ([]byte, error) {

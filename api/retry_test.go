@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -73,6 +74,73 @@ func TestRetry_SecretReadSuccessAfterTransient503(t *testing.T) {
 	}
 	if calls != 3 {
 		t.Errorf("expected 3 calls, got %d", calls)
+	}
+}
+
+func TestRetry_ResponseSizeLimitAppliesToTransientBodies(t *testing.T) {
+	const maxResponseBytes = int64(64)
+	tests := []struct {
+		name          string
+		transientSize int
+		wantCalls     int32
+		wantErr       bool
+	}{
+		{
+			name:          "body at limit is drained and retried",
+			transientSize: int(maxResponseBytes),
+			wantCalls:     2,
+		},
+		{
+			name:          "oversized body aborts retries",
+			transientSize: int(maxResponseBytes + 1),
+			wantCalls:     1,
+			wantErr:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if atomic.AddInt32(&calls, 1) == 1 {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					// Flush the status before writing so Content-Length remains
+					// unknown and the streaming limit is exercised.
+					w.(http.Flusher).Flush()
+					_, _ = w.Write([]byte(strings.Repeat("x", tt.transientSize)))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":{"data":{"field":"value"}}}`))
+			}))
+			defer srv.Close()
+
+			c := newTestRetryClient(srv.URL)
+			if err := c.SetMaxResponseBytes(maxResponseBytes); err != nil {
+				t.Fatalf("SetMaxResponseBytes error: %v", err)
+			}
+			c.SetToken("tok")
+
+			value, err := c.ReadSecret("kv/test", "field", 2)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "response body exceeds 64-byte limit") {
+					t.Fatalf("expected response-size error, got %v", err)
+				}
+				if value != "" {
+					t.Fatalf("expected no value, got %q", value)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("expected retry to succeed, got %v", err)
+				}
+				if value != "value" {
+					t.Fatalf("expected value, got %q", value)
+				}
+			}
+			if got := atomic.LoadInt32(&calls); got != tt.wantCalls {
+				t.Fatalf("expected %d calls, got %d", tt.wantCalls, got)
+			}
+		})
 	}
 }
 

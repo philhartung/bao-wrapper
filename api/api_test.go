@@ -2,6 +2,8 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -296,6 +298,57 @@ func TestClientRejectsRedirects(t *testing.T) {
 			case <-redirected:
 				t.Fatal("redirect target received a request containing credentials")
 			default:
+			}
+		})
+	}
+}
+
+func TestClientResponseSizeLimit(t *testing.T) {
+	responseBody := []byte(`{"data":{"data":{"field":"value"}}}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Force a chunked response so the client cannot rely on Content-Length
+		// and must enforce the limit while reading the body.
+		w.(http.Flusher).Flush()
+		_, _ = w.Write(responseBody)
+	}))
+	defer srv.Close()
+
+	t.Run("accepts body exactly at configured limit", func(t *testing.T) {
+		c := api.New(srv.URL, "")
+		if err := c.SetMaxResponseBytes(int64(len(responseBody))); err != nil {
+			t.Fatalf("SetMaxResponseBytes error: %v", err)
+		}
+
+		value, err := c.ReadSecret("kv/test", "field", 2)
+		if err != nil {
+			t.Fatalf("ReadSecret error: %v", err)
+		}
+		if value != "value" {
+			t.Fatalf("expected value, got %q", value)
+		}
+	})
+
+	t.Run("rejects body over configured limit", func(t *testing.T) {
+		limit := int64(len(responseBody) - 1)
+		c := api.New(srv.URL, "")
+		if err := c.SetMaxResponseBytes(limit); err != nil {
+			t.Fatalf("SetMaxResponseBytes error: %v", err)
+		}
+
+		_, err := c.ReadSecret("kv/test", "field", 2)
+		if err == nil || !strings.Contains(err.Error(), "response body exceeds") {
+			t.Fatalf("expected response-size error, got %v", err)
+		}
+	})
+}
+
+func TestSetMaxResponseBytesRejectsInvalidLimits(t *testing.T) {
+	for _, limit := range []int64{-1, 0, math.MaxInt64} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			if err := api.New("http://127.0.0.1", "").SetMaxResponseBytes(limit); err == nil {
+				t.Fatalf("SetMaxResponseBytes(%d) succeeded", limit)
 			}
 		})
 	}
