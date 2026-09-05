@@ -1,7 +1,7 @@
 # bao-wrapper
 
 **bao-wrapper** is a CI-agnostic process wrapper for [OpenBao](https://openbao.org/) / [HashiCorp Vault](https://developer.hashicorp.com/vault).  
-It fetches secrets at runtime, injects them into the child process's environment (or as temporary files), and masks them in real-time log output — all without touching the CI runner's own environment.
+It fetches secrets at runtime, injects them into the child process's environment (or as temporary files), and masks registered values in captured stdout and stderr — all without touching the CI runner's own environment.
 
 ## Table of Contents
 
@@ -14,9 +14,9 @@ It fetches secrets at runtime, injects them into the child process's environment
   - [Secret variables](#secret-variables)
 - [Template engine](#template-engine)
 - [Examples](#examples)
-  - [GitLab CI](#example-gitlab-ci-pipeline)
-  - [GitHub Actions](#example-github-actions-pipeline)
-  - [AppRole Authentication](#example-approle-authentication)
+  - [GitLab CI](#gitlab-ci-pipeline)
+  - [GitHub Actions](#github-actions-pipeline)
+  - [AppRole Authentication](#approle-authentication)
 - [Architecture](#architecture)
 - [Security notes](#security-notes)
 - [Development](#development)
@@ -26,24 +26,26 @@ It fetches secrets at runtime, injects them into the child process's environment
 | Feature | Details |
 |---|---|
 | **Zero external dependencies** | Uses only the Go standard library (`net/http`, `encoding/json`, …) |
-| **Secure token lifecycle** | Authenticates via direct token, JWT, or AppRole login and revokes the client token on exit |
-| **Real-time log masking** | Chunk-boundary-safe masked writer replaces secrets with `[MASKED]` |
+| **Authentication** | Direct token, JWT/OIDC, or AppRole, with token revocation attempted during cleanup |
+| **Streaming log masking** | Replaces registered plaintext values of at least four bytes with `[MASKED]`, including matches split across writes |
 | **`env` and `file` injection** | Secrets are exposed as env vars or temp files (`0600` on Unix; inherited ACLs on Windows); sensitive config vars are stripped from the child process |
 | **Template engine** | Go `text/template` rendering with in-template `{{ secret "..." }}` lookups and selective masking |
-| **Automatic retry** | Up to 3 retries with exponential backoff on transient server errors (502/503/504) |
-| **No command injection** | Child process launched via `exec.Command`, never via a shell |
-| **Cross-platform** | Linux, macOS (arm64/amd64), Windows (amd64) |
+| **Automatic retry** | Secret reads and revocation: up to 3 retries on network errors or HTTP 502/503/504, with exponential backoff and jitter; logins are not retried |
+| **Direct execution** | Launches the supplied command without implicit shell expansion |
+| **Cross-platform** | Linux, macOS (amd64/arm64), Windows (amd64) |
 
 ---
 
 ## Installation
 
+This README describes the current source. Published releases may differ; build from source if a documented feature is not yet released. In the download examples, replace the version and checksum placeholders with values for your chosen release.
+
 ### Download from GitHub Releases
 
 ```bash
-# Linux amd64; update both values deliberately when upgrading.
-BAO_WRAPPER_VERSION=v0.3.0
-BAO_WRAPPER_SHA256=013df6f0cb6e13c3e9b5266c08a2417619e45c64b81f5ae7faec3f66a2c9d1d5
+# Linux amd64; pin the release version and its verified checksum.
+BAO_WRAPPER_VERSION=vX.Y.Z
+BAO_WRAPPER_SHA256='<verified SHA-256 for the Linux amd64 binary>'
 curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64"
 printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper-linux-amd64 | sha256sum --check --strict
 install -m 0755 bao-wrapper-linux-amd64 bao-wrapper
@@ -59,7 +61,7 @@ Available release assets:
 | macOS arm64 (M-series) | `bao-wrapper-darwin-arm64` |
 | Windows amd64 | `bao-wrapper-windows-amd64.exe` |
 
-New releases also contain `SHA256SUMS`. The manifest and every binary have a GitHub build-provenance attestation tied to this repository's release workflow.
+The current release workflow publishes `SHA256SUMS` and GitHub build-provenance attestations for the manifest and binaries. Older releases may not include them.
 
 ### Verify release provenance
 
@@ -104,9 +106,7 @@ export SECRET_DB_PASS="kv://password@kv/myapp/db"
 bao-wrapper run -- ./my-app
 ```
 
-The child process receives `DB_PASS=<actual value>` in its environment. As a defense-in-depth measure against accidental plaintext logging, bao-wrapper replaces exact occurrences of registered secrets longer than three bytes in the child's captured stdout and stderr with `[MASKED]`. This masking is not a security boundary; see [Security notes](#security-notes) for its limitations. For full CI pipeline examples, see [GitLab CI](#gitlab-ci-pipeline) and [GitHub Actions](#github-actions-pipeline).
-
-> **Note:** Variables with the secret prefix that use an unrecognised engine scheme (e.g. `SECRET_SCANNING_URL` set by CI platforms) are silently skipped.
+The child process receives `DB_PASS=<actual value>`. Exact plaintext matches of registered values at least four bytes long are masked in captured stdout and stderr. See [Security notes](#security-notes) for the limits of masking and cleanup.
 
 ---
 
@@ -129,7 +129,7 @@ bao-wrapper run [options] -- <command> [args...]
 |---|---|---|---|
 | `BAO_ADDR` | `VAULT_ADDR` | **yes** | OpenBao/Vault server URL (e.g. `https://openbao.example.com`) |
 | `BAO_NAMESPACE` | `VAULT_NAMESPACE` | no | Namespace |
-| `BAO_TOKEN` | `VAULT_TOKEN` | no | Direct client token; takes priority over all login methods. Use when a token is already available (e.g. local dev, pre-issued tokens). **The token is revoked on exit** (normal exit, error, or SIGINT/SIGTERM) and cannot be reused afterwards, so do not supply a long-lived or shared static token that must survive multiple runs or jobs. |
+| `BAO_TOKEN` | `VAULT_TOKEN` | no | Direct client token; takes priority over all login methods. Use when a token is already available (e.g. local dev, pre-issued tokens). **Cleanup attempts to revoke this token**, including after secret-fetch failures. Supply a disposable token that is not needed by other runs or jobs. |
 | `BAO_AUTH_PATH` | `VAULT_AUTH_PATH` | no | Authentication mount used for JWT or AppRole login. Accepts `gitlab` and `auth/gitlab` forms. Defaults to `jwt` for JWT and `approle` for AppRole; overridden by `--auth-path`. |
 | `BAO_JWT_ROLE` | `VAULT_JWT_ROLE` | no | JWT auth role (used when `BAO_TOKEN` is not set; skips JWT login when omitted) |
 | `BAO_JWT_TOKEN` | `VAULT_JWT_TOKEN` | no | JWT token for authentication (auto-detected from GitHub Actions OIDC when unset) |
@@ -140,7 +140,9 @@ bao-wrapper run [options] -- <command> [args...]
 | `BAO_OIDC_MAX_RESPONSE_BYTES` | `VAULT_OIDC_MAX_RESPONSE_BYTES` | no | Maximum GitHub Actions OIDC response body size in bytes (default: 65536 / 64 KiB) |
 | `BAO_SECRET_PREFIX` | – | no | Prefix for secret variables (default: `SECRET_`); overridden by `--secret-prefix` |
 
-> **Note:** `BAO_*` variables take priority. If a `BAO_*` variable is not set, the corresponding `VAULT_*` variable is used as a fallback for backwards compatibility with existing CI configurations. Authentication methods are tried in this order: `BAO_TOKEN` (direct token) → `BAO_JWT_ROLE`/`BAO_JWT_TOKEN` (JWT/OIDC) → `BAO_APP_ID`/`BAO_APP_SECRET` (AppRole). `BAO_AUTH_PATH` applies to whichever login method is selected; it is ignored when a direct token is used.
+Nonempty `BAO_*` values take priority over their `VAULT_*` fallbacks. Authentication selects the first applicable method: direct token → JWT role (with an explicit JWT or GitHub OIDC) → AppRole credentials. A selected method does not fall back to another method if credentials are missing or login fails. `BAO_AUTH_PATH` is ignored for direct tokens.
+
+OpenBao/Vault and GitHub OIDC requests have a 10-second HTTP client timeout and do not follow redirects. Secret reads and token revocation retry network errors and HTTP 502/503/504 up to three times, subject to request deadlines; login and OIDC requests are not automatically retried.
 
 ### Secret variables
 
@@ -150,7 +152,7 @@ Define secrets with the configured prefix (default `SECRET_`) using this format:
 <PREFIX><NAME>=<engine>://[[field][:type]@]path
 ```
 
-An explicit supported engine scheme is required. Prefixed variables without one are ignored, preventing ambient `SECRET_*` passwords, tokens, or keys from being interpreted as Vault paths. The `field` and `type` remain optional. Query parameters are not supported; the former `outfile` parameter is rejected, and `type=file` always uses an isolated temporary file that is removed after the child exits.
+An explicit supported engine scheme is required. Prefixed variables without one are skipped during secret discovery and stripped from the child environment. The `field` and `type` are optional. Query parameters are not supported. `file` delivery uses an isolated temporary directory; the destination cannot be configured.
 
 | Component | Default | Description |
 |---|---|---|
@@ -165,7 +167,7 @@ An explicit supported engine scheme is required. Prefixed variables without one 
 | `legacy` | `GET /v1/<path>` (KV v1) | KV v1 path style. The path is used as-is after validation. Example: path `kvv1/test` → `/v1/kvv1/test` |
 | `template` | *(fetches template from KV v2, then renders)* | Fetches a Go `text/template` from a KV v2 path, renders it with `{{ secret "..." }}` support (see [Template engine](#template-engine)) |
 
-> **Legacy path restrictions:** `legacy` accepts only canonical relative paths. Paths below OpenBao's reserved `auth/`, `sys/`, `identity/`, and `cubbyhole/` prefixes are rejected because these are system endpoints, not KV v1 mounts. This restriction also applies to `legacy://` references used inside templates.
+> **Path restrictions:** Secret paths must be canonical and relative, without traversal or redundant separators. `legacy` also rejects OpenBao's reserved `auth/`, `sys/`, `identity/`, and `cubbyhole/` prefixes because these are system endpoints, not KV v1 mounts. This restriction also applies to `legacy://` references used inside templates.
 
 The child process receives the bare name without the prefix.
 
@@ -195,14 +197,7 @@ SECRET_TOKEN=legacy://token:env@kvv1/my/path
 
 The `template` engine fetches a Go [`text/template`](https://pkg.go.dev/text/template) from an OpenBao/Vault KV secret, renders it, and returns the result. This is useful for generating configuration files that embed multiple secrets.
 
-### How it works
-
-1. The raw template content is read from the KV v2 path specified in the `SecretRef` (mount, path, field).
-2. The template is parsed and executed with a custom `{{ secret "url" }}` function.
-3. Each `{{ secret "..." }}` call fetches the referenced secret value inline.
-4. The fully rendered output replaces the secret value in the pipeline.
-
-### Declaration syntax (full)
+### Declaration syntax
 
 Use the `template` engine in the `SECRET_*` variable:
 
@@ -215,15 +210,18 @@ SECRET_APP_CFG=template://tpl:file@kv/myapp/config
 SECRET_APP_CFG=template://tpl@kv/myapp/config
 ```
 
-### In-template syntax (reduced)
+### In-template lookups
 
 Inside the template, use `{{ secret "url" }}` to reference individual secrets. The in-template URL uses a reduced syntax compared to the main `SECRET_*` declaration:
 
 ```
-{{ secret "[engine]://[field]@[path]" }}
+{{ secret "[engine://][field@]path" }}
 ```
 
+The engine defaults to `kv` when omitted. The field is optional; omitting it returns the full JSON data.
+
 **Restrictions for in-template URLs:**
+
 - Only `kv` and `legacy` engines are allowed (no `template` recursion).
 - Type selectors (`:env`, `:file`) are not allowed.
 - Query parameters (`?key=value`) are not allowed.
@@ -247,19 +245,11 @@ With the declaration:
 SECRET_APP_CFG=template://tpl:file@kv/myapp/config
 ```
 
-bao-wrapper will:
-
-1. Fetch the template from `kv/myapp/config` field `tpl`.
-2. Resolve `{{ secret "kv://password@kv/myapp/db" }}` and `{{ secret "kv://token@kv/myapp/api" }}` by fetching each from OpenBao/Vault.
-3. Write the rendered output to a private file in an isolated temporary directory.
-4. Expose the temporary path in `APP_CFG` in the child process environment and remove it when the child exits.
+The wrapper fetches and renders the template, writes it to a temporary file, and exposes the path as `APP_CFG`. Cleanup attempts to remove the file after use; see [Security notes](#security-notes).
 
 ### Selective masking
 
-The template engine applies selective masking to avoid over-masking while still protecting secret values:
-
-- **Template skeleton** (the static text around `{{ secret }}` calls) is **not** masked. This prevents large rendered configs from triggering false-positive masking in log output.
-- **Inner secret values** (each value resolved via `{{ secret "..." }}`) **are** registered with the masking writer. Exact plaintext occurrences of values longer than three bytes in captured stdout or stderr will show `[MASKED]`.
+Only values fetched through `{{ secret "..." }}` are registered for template masking. The template source and complete rendered output are not registered. Literal credentials in a template and transformed values therefore have no automatic masking guarantee. The usual minimum length of four bytes applies.
 
 ---
 
@@ -267,7 +257,7 @@ The template engine applies selective masking to avoid over-masking while still 
 
 ### GitLab CI Pipeline
 
-This example downloads `bao-wrapper` from a GitHub release, uses the GitLab CI JWT token for Vault authentication, and wraps the build command.
+This example uses a JWT auth method mounted at `auth/gitlab` and requires a release supporting `BAO_AUTH_PATH`. It assumes your project provides an npm build script and installs its dependencies before the build.
 
 ```yaml
 # .gitlab-ci.yml
@@ -276,7 +266,7 @@ stages:
 
 build:
   stage: build
-  image: ubuntu:22.04
+  image: node:22-bookworm
   id_tokens:
     BAO_JWT_TOKEN:
       aud: https://vault.example.com
@@ -291,8 +281,8 @@ build:
     SECRET_DOCKER_CFG: "template://tpl:file@kv/ci/docker-config"
   before_script:
     - |
-      BAO_WRAPPER_VERSION=v0.3.0
-      BAO_WRAPPER_SHA256=013df6f0cb6e13c3e9b5266c08a2417619e45c64b81f5ae7faec3f66a2c9d1d5
+      BAO_WRAPPER_VERSION=vX.Y.Z
+      BAO_WRAPPER_SHA256='<verified SHA-256 for the Linux amd64 binary>'
       curl -fsSL \
         "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
         -o /usr/local/bin/bao-wrapper
@@ -302,13 +292,13 @@ build:
     - bao-wrapper run -- npm run build
 ```
 
-The child process receives the resolved secret values as environment variables (e.g. `NPM_TOKEN=<actual value>`) while all sensitive configuration variables (`BAO_*`, `VAULT_*`, `SECRET_*` (or the custom prefix), `ACTIONS_ID_TOKEN_REQUEST_*`) are stripped from its environment. If `NPM_TOKEN` is longer than three bytes, an accidental `console.log` printing its exact plaintext value will appear as `[MASKED]` in the job log. `DOCKER_CFG` contains the rendered config's temporary path. The file uses `0600` permissions on Unix, is removed when the child exits, and its inner secrets are registered for masking in captured stdout and stderr.
+The build receives `NPM_TOKEN` and the temporary config path in `DOCKER_CFG`. The token and secrets fetched inside the template are registered for log masking.
 
 ---
 
-## Example: GitHub Actions Pipeline
+### GitHub Actions Pipeline
 
-When running inside a GitHub Actions workflow with `id-token: write` permissions, `bao-wrapper` **automatically fetches the OIDC JWT token** — no manual token-passing step required. It detects the `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN` environment variables that GitHub injects, requests a JWT, and uses it for Vault authentication.
+With `id-token: write` permission and `BAO_JWT_ROLE` set, the wrapper can request a JWT using GitHub's `ACTIONS_ID_TOKEN_REQUEST_*` variables. Configure the Vault role to accept GitHub's issuer, audience, and repository claims. This example assumes your project provides an npm build script and installs its dependencies before the build.
 
 ```yaml
 # .github/workflows/build.yml
@@ -334,8 +324,8 @@ jobs:
 
       - name: Install bao-wrapper
         run: |
-          BAO_WRAPPER_VERSION=v0.3.0
-          BAO_WRAPPER_SHA256=013df6f0cb6e13c3e9b5266c08a2417619e45c64b81f5ae7faec3f66a2c9d1d5
+          BAO_WRAPPER_VERSION=vX.Y.Z
+          BAO_WRAPPER_SHA256='<verified SHA-256 for the Linux amd64 binary>'
           curl -fsSL \
             "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
             -o bao-wrapper
@@ -350,7 +340,7 @@ jobs:
 
 ---
 
-## Example: AppRole Authentication
+### AppRole Authentication
 
 For non-interactive environments where JWT/OIDC is not available, you can use AppRole authentication by providing a `RoleID` and `SecretID`.
 
@@ -366,66 +356,31 @@ export SECRET_API_KEY="kv://apiKey@kv/services/api"
 bao-wrapper run -- ./start-service.sh
 ```
 
-`bao-wrapper` will perform an AppRole login, fetch the secrets, and automatically revoke the client token upon exit.
+`bao-wrapper` logs in with AppRole, fetches the secrets, runs the command, and attempts to revoke the client token during cleanup.
 
 ---
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    CLI["bao-wrapper run -- &lt;command&gt;"]
-
-    subgraph bao-wrapper
-        PARSER["parser\nParses secret env vars (default SECRET_*)\ninto SecretRef structs"]
-        API["api\nHTTP client for OpenBao/Vault\nJWT · AppRole login\nSecret fetch · Token revoke\nRetry with exponential backoff"]
-        TMPL["template\nFetches Go text/template from KV v2\nRenders {{ secret }} calls inline"]
-        RUNNER["runner\nFilters sensitive env vars\nInjects secrets as env vars or files\nForwards OS signals"]
-        MASKER["masker\nio.Writer wrapper for stdout/stderr\nReplaces secrets with [MASKED]\nChunk-boundary-safe"]
-    end
-
-    VAULT[("OpenBao / Vault")]
-    CHILD["Child process\n(e.g. npm run build)"]
-    LOGS["Log output\n(masked)"]
-
-    CLI --> PARSER
-    PARSER --> API
-    API -->|"JWT / AppRole login\nFetch secrets"| VAULT
-    VAULT -->|"Secret values"| API
-    API --> TMPL
-    TMPL -->|"{{ secret }} lookups"| VAULT
-    API --> RUNNER
-    TMPL --> RUNNER
-    RUNNER -->|"Inject env vars / write files"| CHILD
-    CHILD -->|"stdout / stderr"| MASKER
-    MASKER --> LOGS
-```
+| Package | Responsibility |
+|---|---|
+| `main` | CLI options, authentication selection, secret resolution, token lifecycle |
+| `parser` | Secret declarations and template lookup syntax |
+| `api` | OpenBao/Vault HTTP requests, path validation, retries, token revocation |
+| `template` | Go template rendering and collection of inner secrets for masking |
+| `runner` | Child environment, temporary files, process execution, signals, cleanup |
+| `masker` | Streaming plaintext replacement in stdout and stderr |
 
 ---
 
 ## Security notes
 
-- TLS certificate validation is always enabled (`InsecureSkipVerify` is never set).
-- Vault and GitHub OIDC HTTP clients have an explicit 10-second timeout and reject redirects. GitHub OIDC endpoints must use HTTPS. Vault response bodies are limited to 32 MiB and GitHub OIDC response bodies to 64 KiB by default; both limits are configurable with the environment variables documented above.
-- Configured authentication mounts remain below `/v1/auth/`; absolute, non-canonical, encoded, query, and fragment paths are rejected before a login request is sent.
-- Secret reads and token revocation are retried up to 3 times on network errors or HTTP 502/503/504, using exponential backoff and jitter. JWT and AppRole login requests are attempted exactly once because retrying an ambiguously completed login could issue an untracked token.
-- Authentication roles should enforce short token TTLs and maximum TTLs: a lost login response can leave the outcome unknowable even without an automatic retry.
-- `BAO_*`, `VAULT_*`, the secret prefix variables (default `SECRET_*`), and `ACTIONS_ID_TOKEN_REQUEST_*` environment variables are stripped from the child process environment to prevent credential leakage.
-- File secrets are created exclusively with permission `0600` on Unix inside an isolated temporary directory and removed when the child exits or the wrapper receives a shutdown signal.
-- Secret references cannot select a filesystem destination: query parameters, including the former `outfile` parameter, are rejected. This prevents file secrets from replacing persistent files.
-- Windows does not implement Unix `0600` as an owner-only ACL. Temporary files inherit the containing temporary directory's Windows ACL, so the wrapper should run under an appropriately protected account and temporary-directory configuration.
-- Output masking is a defense-in-depth measure against accidental plaintext leakage. Exact occurrences of registered secrets longer than three bytes in the child process's captured stdout and stderr are replaced with `[MASKED]`; secrets of three bytes or fewer are deliberately not masked to prevent over-masking.
-- Masking is not a security boundary and cannot prevent malicious child code from intentionally exfiltrating secrets. Encoded, escaped, transformed, or noncontiguous fragments do not match the plaintext masker, and output sent anywhere other than the captured stdout and stderr bypasses it.
-- Template engine uses selective masking: inner secret values are registered with the masker, while the template skeleton is not.
-- All secrets (including values resolved via `{{ secret "..." }}` inside templates) are pre-registered with the masker before the child process is started.
-- The Vault token is revoked via `POST /v1/auth/token/revoke-self` on normal
-  exit and immediately when the wrapper receives SIGINT or SIGTERM. Temporary
-  secret paths are unlinked at the same time.
-- Signals are forwarded to the direct child. Process-tree termination and hard
-  shutdown deadlines are delegated to the CI, container, or job runtime.
-- In-template URLs forbid the `template` engine to prevent recursive template rendering.
-- Legacy KV v1 lookups cannot access OpenBao's reserved `auth/`, `sys/`, `identity/`, or `cubbyhole/` endpoint prefixes.
-- Secret prefix variables (default `SECRET_*`) with unrecognised engine schemes are silently skipped.
+- **Transport:** Use an HTTPS `BAO_ADDR` outside local testing; plain HTTP is accepted. HTTPS certificate verification is enabled, with optional custom roots via `BAO_CACERT`. GitHub OIDC requires HTTPS and uses system trust; its request URL comes from the CI environment and has no hostname allowlist.
+- **Child environment:** Inherited variables starting with `BAO_`, `VAULT_`, `ACTIONS_ID_TOKEN_REQUEST_`, or the configured secret prefix are removed case-insensitively before resolved secrets are added. Other environment variables are inherited.
+- **Masking:** Only exact matches of registered values at least four bytes long are masked in captured stdout and stderr. Full-JSON reads register the JSON string, not its individual fields; templates register only inner lookups. Encoding, escaping, splitting a value between streams, or writing elsewhere can bypass masking. Run trusted child code: masking is not a security boundary. Output may be buffered by up to the longest registered value minus one byte to handle matches split across writes.
+- **Temporary files:** File secrets use an isolated temporary directory (`0700`) and exclusive file creation (`0600`) on Unix. Windows uses inherited ACLs, so protect the account and temporary directory. Cleanup attempts removal on child exit and on SIGINT/SIGTERM, retrying removal after exit if necessary.
+- **Token cleanup:** Once a client token is accepted or acquired, cleanup attempts `POST /v1/auth/token/revoke-self`, including after failures before child startup. SIGINT/SIGTERM starts cleanup while the child is running. Revocation can fail, and forced termination such as SIGKILL prevents cleanup. Use disposable tokens with short TTLs; a lost login response can also leave an issued token unavailable for revocation. Tokens are not renewed.
+- **Signals and exit status:** The wrapper attempts to forward SIGINT/SIGTERM to its direct child. Process-tree termination and shutdown deadlines are the CI or container runtime's responsibility; Unix-style signal forwarding is not supported on Windows. Normal child exit codes are preserved, but a cleanup failure turns a successful exit into failure; signal termination is reported as exit code 1.
 
 ---
 
@@ -434,7 +389,7 @@ flowchart TD
 ### Prerequisites
 
 - [Go](https://go.dev/dl/) 1.26.6 (the version pinned by `go.mod` and the release workflow)
-- Access to an OpenBao or HashiCorp Vault instance (for integration testing)
+- Docker with Docker Compose and Bash (for the disposable integration fixture)
 
 ### Running tests
 
@@ -461,14 +416,7 @@ or manual bootstrap commands are required.
 ./integration/test.sh
 ```
 
-The script starts one disposable OpenBao instance, builds the wrapper once, and
-runs isolated scenarios covering AppRole at a custom auth mount and direct-token
-authentication, `BAO_*`/`VAULT_*` fallback and CLI precedence, KV v1/v2 and
-full-JSON reads, environment and temporary-file injection, selective
-template masking, custom secret prefixes, credential stripping, child failures,
-temporary-file cleanup, and token revocation. It then removes the container,
-storage volume, and test artifacts. Set `OPENBAO_PORT` if port 8200 is already
-in use:
+The script builds the wrapper and tests authentication, KV v1/v2 reads, environment and file delivery, template masking, credential stripping, failure handling, cleanup, and revocation against a disposable OpenBao instance. It removes the fixture containers, storage volume, and test artifacts afterwards. Set `OPENBAO_PORT` if port 8200 is already in use:
 
 ```bash
 OPENBAO_PORT=18200 ./integration/test.sh
@@ -476,11 +424,6 @@ OPENBAO_PORT=18200 ./integration/test.sh
 
 The credentials in `compose.yaml` are public fixtures for local and CI testing
 only. They must never be used in a persistent or production environment.
-
-TLS/custom-CA handling, JWT/OIDC, namespace headers, retry fault injection,
-signal forwarding, query-parameter rejection, and deterministic masker chunk boundaries
-remain in the focused Go test suites, where those failure modes can be exercised
-without adding fragile infrastructure to the OpenBao fixture.
 
 ### Building for all platforms
 
@@ -501,7 +444,7 @@ GOOS=windows GOARCH=amd64 go build -o bao-wrapper-windows-amd64.exe .
 
 ### Reproducing a release build
 
-Release builds use the Go version declared in `go.mod`, disable CGO and automatic VCS stamping, remove local paths, and embed the exact tag and full 40-character source commit. To reproduce one asset, start from a clean checkout of its tag and use the same target and flags:
+The current release workflow pins the same Go version as `go.mod`, disables CGO and automatic VCS stamping, removes local paths, and embeds the version from `git describe --tags --always` and full source commit. To reproduce one asset, start from a clean checkout of its tag and use the same target and flags:
 
 ```bash
 VERSION=vX.Y.Z
@@ -518,4 +461,4 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 sha256sum bao-wrapper-linux-amd64
 ```
 
-Compare the result with the attested `SHA256SUMS` entry. Reproduction requires the exact Go toolchain version and target architecture used by the workflow. Repository administrators should also enable GitHub's immutable-releases setting so a published tag and its assets cannot be altered; that repository-level policy cannot be enabled from this workflow file.
+Compare the result with the attested `SHA256SUMS` entry. Reproduction requires the exact Go toolchain version and target architecture used by the workflow.
