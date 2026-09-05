@@ -1225,7 +1225,11 @@ func TestRun_TemplateErrorsDoNotDiscloseSecrets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer stderr.Close()
+			defer func() {
+				if err := stderr.Close(); err != nil {
+					t.Errorf("close stderr capture: %v", err)
+				}
+			}()
 			originalStderr := os.Stderr
 			os.Stderr = stderr
 			defer func() { os.Stderr = originalStderr }()
