@@ -8,11 +8,39 @@ package template
 
 import (
 	"bytes"
-	"fmt"
+	"errors"
+	"regexp"
 	"text/template"
 
 	"github.com/philhartung/bao-wrapper/parser"
 )
+
+var (
+	errSecretReference = errors.New("secret: invalid reference")
+	errSecretRead      = errors.New("secret: fetch failed")
+	// Only accept the fixed parse name and numeric location supplied by Go.
+	// Template names, expressions, and the remainder of the error are untrusted.
+	errorLocation = regexp.MustCompile(`^template: secret-template:([0-9]+)(?::([0-9]+))?:`)
+)
+
+// renderError deliberately does not wrap the original error: even its causes
+// can contain template source, fetched secrets, or transformed secret values.
+func renderError(stage string, err error) error {
+	message := "template: " + stage + " failed"
+	if location := errorLocation.FindStringSubmatch(err.Error()); location != nil {
+		message += " at line " + location[1]
+		if location[2] != "" {
+			message += ", column " + location[2]
+		}
+	}
+	for _, category := range []error{errSecretReference, errSecretRead} {
+		if errors.Is(err, category) {
+			message += ": " + category.Error()
+			break
+		}
+	}
+	return errors.New(message)
+}
 
 // SecretReader abstracts fetching a secret value (implemented by api.Client).
 type SecretReader interface {
@@ -36,11 +64,13 @@ type Result struct {
 // The template string itself is NOT added to the masking list (to avoid
 // over-masking and performance issues). Each value resolved via the
 // {{ secret }} function IS included in Result.InnerSecrets.
+// Errors expose only the stage, numeric source location when available, and
+// safe helper failure categories, so callers can log them before masking exists.
 func Render(ref parser.SecretRef, reader SecretReader) (*Result, error) {
 	// Fetch the raw template content from the KV path.
 	tplContent, err := reader.ReadSecret(ref.Path, ref.Field, parser.KVVersionForEngine(ref.Engine))
 	if err != nil {
-		return nil, fmt.Errorf("template: fetch template: %w", err)
+		return nil, errors.New("template: fetch template failed")
 	}
 
 	var innerSecrets []string
@@ -50,11 +80,11 @@ func Render(ref parser.SecretRef, reader SecretReader) (*Result, error) {
 		"secret": func(raw string) (string, error) {
 			inner, err := parser.ParseTemplateSecretURL(raw)
 			if err != nil {
-				return "", fmt.Errorf("template: secret %q: %w", raw, err)
+				return "", errSecretReference
 			}
 			val, err := reader.ReadSecret(inner.Path, inner.Field, parser.KVVersionForEngine(inner.Engine))
 			if err != nil {
-				return "", fmt.Errorf("template: secret %q: %w", raw, err)
+				return "", errSecretRead
 			}
 			innerSecrets = append(innerSecrets, val)
 			return val, nil
@@ -63,12 +93,12 @@ func Render(ref parser.SecretRef, reader SecretReader) (*Result, error) {
 
 	tmpl, err := template.New("secret-template").Funcs(funcMap).Parse(tplContent)
 	if err != nil {
-		return nil, fmt.Errorf("template: parse: %w", err)
+		return nil, renderError("parse", err)
 	}
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, nil); err != nil {
-		return nil, fmt.Errorf("template: execute: %w", err)
+		return nil, renderError("execute", err)
 	}
 
 	return &Result{

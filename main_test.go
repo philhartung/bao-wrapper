@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math"
 	"math/big"
@@ -1124,4 +1125,135 @@ func generateSelfSignedCert(t *testing.T) []byte {
 	}
 
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+const templateFailureChildMarkerEnv = "GO_WANT_BAO_TEMPLATE_FAILURE_CHILD_MARKER"
+
+func TestTemplateFailureChildHelper(t *testing.T) {
+	if marker := os.Getenv(templateFailureChildMarkerEnv); marker != "" {
+		if err := os.WriteFile(marker, []byte("started"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestRun_TemplateErrorsDoNotDiscloseSecrets(t *testing.T) {
+	const (
+		password   = "review-private-password-8af231"
+		credential = "review_source_credential_91ba3c"
+	)
+	for _, tt := range []struct {
+		name   string
+		source string
+		stage  string
+		reads  int
+	}{
+		{
+			name:   "nested secret calls",
+			source: `{{ secret (secret "kv://password@kv/private") }}`,
+			stage:  "execute", reads: 1,
+		},
+		{
+			name:   "transformed fetched secret",
+			source: `{{ secret (printf "%x" (secret "kv://password@kv/private")) }}`,
+			stage:  "execute", reads: 1,
+		},
+		{
+			name:   "invalid helper reference from fetched secret",
+			source: `{{ secret (printf "kv://%s:env@kv/private" (secret "kv://password@kv/private")) }}`,
+			stage:  "execute", reads: 1,
+		},
+		{
+			name:   "malformed template with source credential",
+			source: `{{ ` + credential + ` }}`,
+			stage:  "parse",
+		},
+		{
+			name:   "malformed named template",
+			source: `{{ define "` + credential + `" }}first{{ end }}{{ define "` + credential + `" }}x{{ end }}`,
+			stage:  "parse",
+		},
+		{
+			name:   "execution failure after partial output",
+			source: `{{ secret "kv://password@kv/private" }}{{ index "` + credential + `" "invalid-index" }}`,
+			stage:  "execute", reads: 1,
+		},
+		{
+			name:   "execution error containing fetched value",
+			source: `{{ range secret "kv://password@kv/private" }}{{ end }}`,
+			stage:  "execute", reads: 1,
+		},
+		{
+			name:   "execution error in named template",
+			source: `{{ define "` + credential + `" }}{{ range secret "kv://password@kv/private" }}{{ end }}{{ end }}{{ template "` + credential + `" }}`,
+			stage:  "execute", reads: 1,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reads, revocations := 0, 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var data map[string]string
+				switch r.URL.Path {
+				case "/v1/kv/data/config":
+					data = map[string]string{"template": "\n" + tt.source}
+				case "/v1/kv/data/private":
+					reads++
+					data = map[string]string{"password": password}
+				case "/v1/auth/token/revoke-self":
+					revocations++
+					w.WriteHeader(http.StatusNoContent)
+					return
+				default:
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"data": data}})
+			}))
+			defer srv.Close()
+
+			t.Setenv("BAO_ADDR", srv.URL)
+			t.Setenv("BAO_TOKEN", "template-test-token")
+			for _, key := range []string{"BAO_CACERT", "VAULT_CACERT", "BAO_NAMESPACE", "VAULT_NAMESPACE", "BAO_MAX_RESPONSE_BYTES", "VAULT_MAX_RESPONSE_BYTES"} {
+				t.Setenv(key, "")
+			}
+			t.Setenv("TEMPLATE_ERROR_TEST_CFG", "template://template@kv/config")
+			marker := t.TempDir() + "/child-started"
+			t.Setenv(templateFailureChildMarkerEnv, marker)
+
+			stderr, err := os.CreateTemp(t.TempDir(), "stderr")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stderr.Close()
+			originalStderr := os.Stderr
+			os.Stderr = stderr
+			defer func() { os.Stderr = originalStderr }()
+			code := run([]string{"run", "--secret-prefix", "TEMPLATE_ERROR_TEST_", "--", os.Args[0], "-test.run=^TestTemplateFailureChildHelper$"})
+			os.Stderr = originalStderr
+			output, err := os.ReadFile(stderr.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code != 1 {
+				t.Errorf("expected exit code 1, got %d", code)
+			}
+			if reads != tt.reads || revocations != 1 {
+				t.Errorf("got %d successful secret reads and %d revocations; want %d and 1", reads, revocations, tt.reads)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Errorf("child must not start on template failure; marker stat: %v", err)
+			}
+			message := string(output)
+			for _, sensitive := range []string{password, fmt.Sprintf("%x", password), credential, tt.source, "kv://password@kv/private"} {
+				if strings.Contains(message, sensitive) {
+					t.Errorf("stderr disclosed sensitive content: %q", message)
+				}
+			}
+			wantPrefix := "error: render template CFG: template: " + tt.stage + " failed at line 2"
+			if !strings.HasPrefix(message, wantPrefix) {
+				t.Errorf("expected safe stage and location %q, got %q", wantPrefix, message)
+			}
+		})
+	}
 }
