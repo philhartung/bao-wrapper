@@ -2,6 +2,7 @@ package template_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -92,7 +93,7 @@ func TestRender_InvalidInnerEngine(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for disallowed engine")
 	}
-	if !strings.Contains(err.Error(), "unknown engine") {
+	if !strings.Contains(err.Error(), "secret: invalid reference") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -108,7 +109,7 @@ func TestRender_InnerTypeRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for type in template secret")
 	}
-	if !strings.Contains(err.Error(), "not allowed in templates") {
+	if !strings.Contains(err.Error(), "secret: invalid reference") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -124,7 +125,7 @@ func TestRender_InnerQueryRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for query args in template secret")
 	}
-	if !strings.Contains(err.Error(), "not allowed in templates") {
+	if !strings.Contains(err.Error(), "secret: invalid reference") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -133,9 +134,9 @@ func TestRender_KVVersionForEngine(t *testing.T) {
 	// Verify that kv inner secrets use kvVersion=2 and legacy inner
 	// secrets use kvVersion=1 when fetched through the template engine.
 	reader := newVersionCapturingReader(map[string]string{
-		"cfg/tpl":           `{{ secret "kv://pass@app/db" }} {{ secret "legacy://token@art/npm" }}`,
-		"app/db/pass":       "dbpass",
-		"art/npm/token":     "arttoken",
+		"cfg/tpl":       `{{ secret "kv://pass@app/db" }} {{ secret "legacy://token@art/npm" }}`,
+		"app/db/pass":   "dbpass",
+		"art/npm/token": "arttoken",
 	})
 
 	ref := parser.SecretRef{Engine: "kv", Path: "cfg", Field: "tpl"}
@@ -155,5 +156,24 @@ func TestRender_KVVersionForEngine(t *testing.T) {
 	// legacy inner secret must use kvVersion=1.
 	if got := reader.capturedVersions["art/npm/token"]; got != 1 {
 		t.Errorf("legacy secret kvVersion: want 1, got %d", got)
+	}
+}
+
+func TestRender_FetchErrorDoesNotExposeCause(t *testing.T) {
+	// The reader's error contains the path; Render must not expose it, even
+	// through unwrapping or detailed formatting of the returned error.
+	ref := parser.SecretRef{Engine: "template", Path: "source-credential-91ba3c"}
+	result, err := tmpl.Render(ref, &fakeReader{})
+	if err == nil {
+		t.Fatal("expected template fetch to fail")
+	}
+	if result != nil {
+		t.Fatal("expected no result on failure")
+	}
+	if got := fmt.Sprintf("%+v", err); got != "template: fetch template failed" {
+		t.Errorf("unexpected fetch error: %q", got)
+	}
+	if errors.Unwrap(err) != nil {
+		t.Fatal("template error must not retain an unsafe cause")
 	}
 }
