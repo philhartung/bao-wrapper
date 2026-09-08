@@ -27,7 +27,7 @@ func run() error {
 	if len(os.Args) < 3 {
 		return fmt.Errorf("expected spec and report paths")
 	}
-	data, err := os.ReadFile(os.Args[1])
+	data, err := os.ReadFile(os.Args[1]) // #nosec G703 -- integration harness supplies the spec path in its temporary directory
 	if err != nil {
 		return err
 	}
@@ -54,7 +54,7 @@ func run() error {
 	values := map[string]string{}
 	for key, want := range spec.Files {
 		path := os.Getenv(key)
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) // #nosec G304 G703 -- test child intentionally reads wrapper-generated secret paths from the environment
 		if err != nil {
 			return err
 		}
@@ -119,5 +119,5 @@ func writeReport(path string, report probe.Report) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0600)
+	return os.WriteFile(path, data, 0600) // #nosec G703 -- integration harness supplies the report path in its temporary directory
 }

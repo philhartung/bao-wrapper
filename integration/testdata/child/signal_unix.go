@@ -14,12 +14,12 @@ func waitForSignal(report string) error {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	if err := os.WriteFile(report+".ready", []byte("ready"), 0600); err != nil {
+	if err := os.WriteFile(report+".ready", []byte("ready"), 0600); err != nil { // #nosec G703 -- readiness marker uses the harness-supplied temporary report path
 		return err
 	}
 	select {
 	case sig := <-signals:
-		if err := os.WriteFile(report+".signal", []byte(sig.String()), 0600); err != nil {
+		if err := os.WriteFile(report+".signal", []byte(sig.String()), 0600); err != nil { // #nosec G703 -- signal marker uses the harness-supplied temporary report path
 			return err
 		}
 	case <-time.After(10 * time.Second):
@@ -28,7 +28,7 @@ func waitForSignal(report string) error {
 	// Remain alive until the parent has checked cleanup and revocation.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(report + ".release"); err == nil {
+		if _, err := os.Stat(report + ".release"); err == nil { // #nosec G703 -- release marker uses the harness-supplied temporary report path
 			return nil
 		}
 		time.Sleep(20 * time.Millisecond)
