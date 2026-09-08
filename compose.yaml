@@ -24,6 +24,7 @@ services:
       - "127.0.0.1:${OPENBAO_PORT:-8200}:8200"
     volumes:
       - ./integration/openbao.hcl:/openbao/config/openbao.hcl:ro
+      - ./integration/bootstrap.hcl:/openbao/config/bootstrap.hcl:ro
       - openbao-data:/openbao/data
     healthcheck:
       test: ["CMD", "bao", "status", "-address=http://127.0.0.1:8200"]

@@ -481,6 +481,33 @@ func TestContext_RevokeTokenSucceedsAfterCancel(t *testing.T) {
 	}
 }
 
+// A shutdown signal can cancel the main context after revocation starts,
+// because the CLI and runner receive the signal independently.
+func TestContext_RevokeTokenSurvivesCancellationDuringRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := false
+	c := NewWithTransport("http://bao.invalid", "", roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		called = true
+		cancel()
+		if err := req.Context().Err(); err != nil {
+			return nil, err
+		}
+		if deadline, ok := req.Context().Deadline(); !ok || time.Until(deadline) > cleanupTimeout {
+			t.Error("revocation must have its own bounded cleanup deadline")
+		}
+		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Header: make(http.Header)}, nil
+	}))
+	c.SetContext(ctx)
+	c.SetToken("tok")
+	if err := c.RevokeToken(); err != nil {
+		t.Fatalf("cancelling the main context interrupted revocation: %v", err)
+	}
+	if !called {
+		t.Fatal("revocation request was not sent")
+	}
+}
+
 // TestContext_RetryAbortsOnCancellation verifies that the retry transport
 // stops retrying once the request context is cancelled.
 func TestContext_RetryAbortsOnCancellation(t *testing.T) {

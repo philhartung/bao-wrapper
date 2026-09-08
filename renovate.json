@@ -1,0 +1,29 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update OpenBao and the SHA-256 of its checksums.txt release asset",
+      "managerFilePatterns": ["/^integration/openbao\\.json$/"],
+      "matchStrings": [
+        "\"version\":\\s*\"(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)\",\\s*\"sha256\":\\s*\"(?<currentDigest>[a-f0-9]{64})\""
+      ],
+      "depNameTemplate": "openbao/openbao",
+      "datasourceTemplate": "github-release-attachments",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Keep the native OpenBao fixture and both Compose services together",
+      "matchPackageNames": ["openbao/openbao", "ghcr.io/openbao/openbao"],
+      "groupName": "OpenBao",
+      "groupSlug": "openbao",
+      "separateMajorMinor": false
+    }
+  ]
+}

@@ -389,7 +389,7 @@ bao-wrapper run -- ./start-service.sh
 ### Prerequisites
 
 - [Go](https://go.dev/dl/) 1.26.6 (the version pinned by `go.mod` and the release workflow)
-- Docker with Docker Compose and Bash (for the disposable integration fixture)
+- [OpenBao](https://github.com/openbao/openbao/releases), using the version in [`integration/openbao.json`](integration/openbao.json) (for native integration tests)
 
 ### Running tests
 
@@ -407,23 +407,57 @@ go test -cover ./...
 
 ### Running integration tests
 
-The integration fixture uses Docker Compose and OpenBao 2.6. OpenBao starts
-with a static test-only auto-unseal key and uses declarative self-initialization
-to mount KV v1/v2, seed secrets, and create a read-only AppRole. No root token
-or manual bootstrap commands are required.
+The integration suite runs the compiled wrapper and a Go child helper against a
+native OpenBao process on Linux, macOS, and Windows. Install the OpenBao version
+pinned in [`integration/openbao.json`](integration/openbao.json) on `PATH`, or set
+`BAO_TEST_BINARY` to the full path to `bao` (`bao.exe` on Windows).
+The suite never downloads dependencies itself and fails clearly if OpenBao is
+missing. Ordinary `go test ./...` does not require OpenBao.
 
-```bash
-./integration/test.sh
+```sh
+go test -tags=integration -count=1 -timeout=8m -v ./integration
 ```
 
-The script builds the wrapper and tests authentication, KV v1/v2 reads, environment and file delivery, template masking, credential stripping, failure handling, cleanup, and revocation against a disposable OpenBao instance. It removes the fixture containers, storage volume, and test artifacts afterwards. Set `OPENBAO_PORT` if port 8200 is already in use:
+Local development only requires an installed OpenBao executable; no installer
+script or PowerShell is required to run the tests.
 
-```bash
-OPENBAO_PORT=18200 ./integration/test.sh
+CI uses a small PowerShell installer, available on all three hosted runner
+platforms. It first verifies the SHA-256 of OpenBao's `checksums.txt` against
+`integration/openbao.json`, then verifies the native archive against that trusted
+checksum list before extracting it. One committed digest therefore pins the
+archives for every platform. The release tag and digest are updated together by
+Renovate; neither is fetched as an unpinned value during CI.
+
+Each suite builds its own executables, selects a loopback port, and creates
+isolated storage. A static test-only auto-unseal key and shared declarative
+self-initialization mount KV v1/v2, seed secrets, and create a read-only AppRole;
+no root token or manual bootstrap is needed. Server and child processes have
+bounded lifetimes, temporary resources are cleaned up, and server logs are
+printed on failures. Independent invocations can run concurrently.
+
+The scenarios cover authentication, KV engines, environment and file delivery,
+template masking, credential stripping, argument/stdin forwarding, Unicode and
+space-containing paths, failure handling, cleanup, and token revocation. Unix
+also checks file/directory permissions and SIGINT/SIGTERM forwarding; Windows
+checks file access and cleanup under inherited ACLs. CI runs the suite on all
+three operating systems for PRs, main pushes, and release tags, and requires the
+whole matrix before publishing a release. JWT and TLS integration fixtures are
+not yet included; transport faults remain covered by mock-server tests.
+
+Docker Compose remains available as an optional **manual** fixture using the
+same initialization declarations:
+
+```sh
+docker compose up --detach --wait openbao
+# When finished:
+docker compose down --volumes --remove-orphans
 ```
 
-The credentials in `compose.yaml` are public fixtures for local and CI testing
-only. They must never be used in a persistent or production environment.
+Set `OPENBAO_PORT` to change the Compose fixture's default port 8200. It does not
+affect the native suite, which always starts its own server. Remove the Compose
+volume before restarting if you need to reapply initialization changes.
+All fixture credentials and seal keys are public test values and must never be
+used in a persistent or production environment.
 
 ### Building for all platforms
 

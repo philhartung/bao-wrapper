@@ -28,6 +28,7 @@ jobs:
         with:
           version: v2.12.2
           install-mode: goinstall
+          args: --build-tags=integration ./... ./integration/testdata/child
 
       - name: gosec security checker
         run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 ./...
@@ -56,8 +57,12 @@ jobs:
   # Run the OpenBao integration fixture for every workflow event and use it to
   # gate release publication.
   integration:
-    name: OpenBao Integration
-    runs-on: ubuntu-24.04
+    name: OpenBao Integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-latest]
     needs: [lint, test]
     timeout-minutes: 10
     permissions:
@@ -71,8 +76,14 @@ jobs:
           go-version: "1.26.6"
           cache: true
 
-      - name: Run integration test
-        run: ./integration/test.sh
+      - name: Install pinned OpenBao
+        shell: pwsh
+        run: |
+          ./integration/tools/install-openbao.ps1 -Destination "$env:RUNNER_TEMP/openbao"
+          "$env:RUNNER_TEMP/openbao" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Run native integration tests
+        run: go test -tags=integration -count=1 -timeout=8m -v ./integration
 
   # ── Build ─────────────────────────────────────────────────────────────────────
   build:
