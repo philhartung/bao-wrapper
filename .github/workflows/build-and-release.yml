@@ -33,7 +33,7 @@ jobs:
       - name: gosec security checker
         env:
           # renovate: datasource=go depName=github.com/securego/gosec/v2
-          GOSEC_VERSION: v2.28.0
+          GOSEC_VERSION: v2.29.0
         run: go run "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}" ./...
 
   # ── Test ─────────────────────────────────────────────────────────────────────
