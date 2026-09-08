@@ -82,7 +82,7 @@ func newSuite(t *testing.T) *suite {
 	}
 	bao, err := exec.LookPath(bao)
 	if err != nil {
-		t.Fatal("integration tests require OpenBao 2.6.2: install bao on PATH or set BAO_TEST_BINARY")
+		t.Fatal("integration tests require OpenBao: install the version in integration/openbao.json on PATH or set BAO_TEST_BINARY")
 	}
 	bao, err = filepath.Abs(bao)
 	if err != nil {

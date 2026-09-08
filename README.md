@@ -389,7 +389,7 @@ bao-wrapper run -- ./start-service.sh
 ### Prerequisites
 
 - [Go](https://go.dev/dl/) 1.26.6 (the version pinned by `go.mod` and the release workflow)
-- [OpenBao](https://github.com/openbao/openbao/releases/tag/v2.6.2) 2.6.2 (for native integration tests)
+- [OpenBao](https://github.com/openbao/openbao/releases), using the version in [`integration/openbao.json`](integration/openbao.json) (for native integration tests)
 
 ### Running tests
 
@@ -408,8 +408,9 @@ go test -cover ./...
 ### Running integration tests
 
 The integration suite runs the compiled wrapper and a Go child helper against a
-native OpenBao process on Linux, macOS, and Windows. Install OpenBao 2.6.2 on
-`PATH`, or set `BAO_TEST_BINARY` to the full path to `bao` (`bao.exe` on Windows).
+native OpenBao process on Linux, macOS, and Windows. Install the OpenBao version
+pinned in [`integration/openbao.json`](integration/openbao.json) on `PATH`, or set
+`BAO_TEST_BINARY` to the full path to `bao` (`bao.exe` on Windows).
 The suite never downloads dependencies itself and fails clearly if OpenBao is
 missing. Ordinary `go test ./...` does not require OpenBao.
 
@@ -417,18 +418,15 @@ missing. Ordinary `go test ./...` does not require OpenBao.
 go test -tags=integration -count=1 -timeout=8m -v ./integration
 ```
 
-On systems with Bash, `./integration/test.sh` runs the same command and forwards
-additional Go test flags. To install the checksum-pinned version used by CI into
-a new directory (including on Windows):
+Local development only requires an installed OpenBao executable; no installer
+script or PowerShell is required to run the tests.
 
-```sh
-go run ./integration/tools/install-openbao.go ./bin/openbao
-```
-
-Then set `BAO_TEST_BINARY` to the absolute path of the installed executable, or
-add that directory to `PATH`. The installer supports Linux/macOS amd64 and arm64,
-and Windows amd64. Version updates must update its committed archive digests
-alongside the Compose image pin.
+CI uses a small PowerShell installer, available on all three hosted runner
+platforms. It first verifies the SHA-256 of OpenBao's `checksums.txt` against
+`integration/openbao.json`, then verifies the native archive against that trusted
+checksum list before extracting it. One committed digest therefore pins the
+archives for every platform. The release tag and digest are updated together by
+Renovate; neither is fetched as an unpinned value during CI.
 
 Each suite builds its own executables, selects a loopback port, and creates
 isolated storage. A static test-only auto-unseal key and shared declarative
