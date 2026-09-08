@@ -314,17 +314,12 @@ func validateSecretPath(secretPath string, kvVersion int) error {
 	return nil
 }
 
-// RevokeToken revokes the stored client token.
-// If the client's main context has already been cancelled (e.g. due to an OS
-// signal), a fresh timeout context is used so the cleanup call can still
-// succeed.
+// RevokeToken revokes the stored client token using an independent, bounded
+// context. The main context may be cancelled before or during cleanup when
+// the CLI and runner receive a shutdown signal independently.
 func (c *Client) RevokeToken() error {
-	ctx := c.effectiveCtx()
-	if ctx.Err() != nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.Background(), cleanupTimeout)
-		defer cancel()
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
 	_, err := c.doWithTransientRetries(ctx, http.MethodPost, "/v1/auth/token/revoke-self", nil)
 	return err
 }
