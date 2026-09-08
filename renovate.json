@@ -6,10 +6,63 @@
   "semanticCommitScope": "deps",
   "extends": [
     "config:best-practices",
-    "helpers:pinGitHubActionDigests",
     "customManagers:githubActionsVersions"
   ],
   "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update README bao-wrapper download versions and Linux amd64 checksums together",
+      "managerFilePatterns": ["/^README\\.md$/"],
+      "matchStrings": [
+        "BAO_WRAPPER_VERSION=(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)\\r?\\n[ \\t]*BAO_WRAPPER_SHA256='(?<currentDigest>[a-f0-9]{64})'"
+      ],
+      "depNameTemplate": "philhartung/bao-wrapper",
+      "datasourceTemplate": "github-release-attachments",
+      "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Update pinned GitHub Actions and their digests in README examples",
+      "managerFilePatterns": ["/^README\\.md$/"],
+      "matchStrings": [
+        "uses: (?<depName>actions/checkout)@(?<currentDigest>[a-f0-9]{40}) # (?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "github-actions"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the Node container tag and digest in the README GitLab example",
+      "managerFilePatterns": ["/^README\\.md$/"],
+      "matchStrings": [
+        "image: (?<depName>node):(?<currentValue>[0-9]+(?:\\.[0-9]+)*-bookworm)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker",
+      "autoReplaceStringTemplate": "image: {{{depName}}}:{{{newValue}}}{{#if newDigest}}@{{{newDigest}}}{{/if}}"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the pinned runner in the README GitHub Actions example",
+      "managerFilePatterns": ["/^README\\.md$/"],
+      "matchStrings": [
+        "runs-on: (?<depName>ubuntu)-(?<currentValue>[0-9]+\\.[0-9]+)"
+      ],
+      "datasourceTemplate": "github-runners",
+      "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Update versioned runners inside CI OS matrices",
+      "managerFilePatterns": ["/^\\.github/workflows/build-and-release\\.yml$/"],
+      "matchStringsStrategy": "recursive",
+      "matchStrings": [
+        "os:\\s*\\[[^\\]\\r\\n]+\\]",
+        "(?<depName>ubuntu|macos|windows)-(?<currentValue>[0-9]+(?:\\.[0-9]+)*(?:-[a-z]+)?)"
+      ],
+      "datasourceTemplate": "github-runners",
+      "versioningTemplate": "docker"
+    },
     {
       "customType": "regex",
       "description": "Update OpenBao and the SHA-256 of its checksums.txt release asset",
@@ -24,24 +77,20 @@
   ],
   "packageRules": [
     {
-      "description": "Update the minimum Go version declared in go.mod",
-      "matchManagers": ["gomod"],
-      "matchDepNames": ["go"],
-      "matchDepTypes": ["golang"],
-      "rangeStrategy": "bump"
+      "matchPackageNames": ["philhartung/bao-wrapper"],
+      "automerge": true
     },
     {
-      "description": "Keep go.mod and the CI Go versions together",
+      "description": "Bump the minimum Go version and keep CI Go versions in sync",
       "matchManagers": ["gomod", "github-actions"],
       "matchDepNames": ["go"],
-      "groupName": "Go",
-      "groupSlug": "go"
+      "rangeStrategy": "bump",
+      "groupName": "Go"
     },
     {
       "description": "Keep the native OpenBao fixture and both Compose services together",
       "matchPackageNames": ["openbao/openbao", "ghcr.io/openbao/openbao"],
       "groupName": "OpenBao",
-      "groupSlug": "openbao",
       "separateMajorMinor": false
     }
   ]
