@@ -3,7 +3,8 @@
   "dependencyDashboard": true,
   "extends": [
     "config:best-practices",
-    "helpers:pinGitHubActionDigests"
+    "helpers:pinGitHubActionDigests",
+    "customManagers:githubActionsVersions"
   ],
   "customManagers": [
     {
@@ -19,6 +20,20 @@
     }
   ],
   "packageRules": [
+    {
+      "description": "Update the minimum Go version declared in go.mod",
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "matchDepTypes": ["golang"],
+      "rangeStrategy": "bump"
+    },
+    {
+      "description": "Keep go.mod and the CI Go versions together",
+      "matchManagers": ["gomod", "github-actions"],
+      "matchDepNames": ["go"],
+      "groupName": "Go",
+      "groupSlug": "go"
+    },
     {
       "description": "Keep the native OpenBao fixture and both Compose services together",
       "matchPackageNames": ["openbao/openbao", "ghcr.io/openbao/openbao"],

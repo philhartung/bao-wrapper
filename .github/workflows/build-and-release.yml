@@ -31,7 +31,10 @@ jobs:
           args: --build-tags=integration ./... ./integration/testdata/child
 
       - name: gosec security checker
-        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 ./...
+        env:
+          # renovate: datasource=go depName=github.com/securego/gosec/v2
+          GOSEC_VERSION: v2.28.0
+        run: go run "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}" ./...
 
   # ── Test ─────────────────────────────────────────────────────────────────────
   test:
