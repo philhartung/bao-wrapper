@@ -44,8 +44,8 @@ This README describes the current source. Published releases may differ; build f
 
 ```bash
 # Linux amd64; pin the release version and its verified checksum.
-BAO_WRAPPER_VERSION=v0.5.0
-BAO_WRAPPER_SHA256='43dbbf20d7c06f513f4cd58f5acd58b28a811b4f47754b246570b71c4c4a38ee'
+BAO_WRAPPER_VERSION=v0.6.0
+BAO_WRAPPER_SHA256='106324f3ddcd007727082c5ccf1d3237cb470a9231afeaa7ab9d6bb67cdf8610'
 curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64"
 printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper-linux-amd64 | sha256sum --check --strict
 install -m 0755 bao-wrapper-linux-amd64 bao-wrapper
@@ -70,8 +70,8 @@ The current release workflow publishes an SPDX 2.3 JSON SBOM for each binary as 
 For releases containing `SHA256SUMS`, download the manifest and selected binary from an explicit version, authenticate both with the [GitHub CLI](https://cli.github.com/), and only then install the binary:
 
 ```bash
-BAO_WRAPPER_VERSION=v0.5.0
-BAO_WRAPPER_SHA256='43dbbf20d7c06f513f4cd58f5acd58b28a811b4f47754b246570b71c4c4a38ee'
+BAO_WRAPPER_VERSION=v0.6.0
+BAO_WRAPPER_SHA256='106324f3ddcd007727082c5ccf1d3237cb470a9231afeaa7ab9d6bb67cdf8610'
 curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/SHA256SUMS"
 curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64"
 
@@ -295,8 +295,8 @@ build:
     SECRET_DOCKER_CFG: "template://tpl:file@kv/ci/docker-config"
   before_script:
     - |
-      BAO_WRAPPER_VERSION=v0.5.0
-      BAO_WRAPPER_SHA256='43dbbf20d7c06f513f4cd58f5acd58b28a811b4f47754b246570b71c4c4a38ee'
+      BAO_WRAPPER_VERSION=v0.6.0
+      BAO_WRAPPER_SHA256='106324f3ddcd007727082c5ccf1d3237cb470a9231afeaa7ab9d6bb67cdf8610'
       curl -fsSL \
         "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
         -o /usr/local/bin/bao-wrapper
@@ -338,8 +338,8 @@ jobs:
 
       - name: Install bao-wrapper
         run: |
-          BAO_WRAPPER_VERSION=v0.5.0
-          BAO_WRAPPER_SHA256='43dbbf20d7c06f513f4cd58f5acd58b28a811b4f47754b246570b71c4c4a38ee'
+          BAO_WRAPPER_VERSION=v0.6.0
+          BAO_WRAPPER_SHA256='106324f3ddcd007727082c5ccf1d3237cb470a9231afeaa7ab9d6bb67cdf8610'
           curl -fsSL \
             "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
             -o bao-wrapper
@@ -495,8 +495,8 @@ GOOS=windows GOARCH=amd64 go build -o bao-wrapper-windows-amd64.exe .
 The current release workflow pins the same Go version as `go.mod`, disables CGO and automatic VCS stamping, removes local paths, and embeds the version from `git describe --tags --always` and full source commit. To reproduce one asset, start from a clean checkout of its tag and use the same target and flags:
 
 ```bash
-BAO_WRAPPER_VERSION=v0.5.0
-BAO_WRAPPER_SHA256='43dbbf20d7c06f513f4cd58f5acd58b28a811b4f47754b246570b71c4c4a38ee'
+BAO_WRAPPER_VERSION=v0.6.0
+BAO_WRAPPER_SHA256='106324f3ddcd007727082c5ccf1d3237cb470a9231afeaa7ab9d6bb67cdf8610'
 git clone https://github.com/philhartung/bao-wrapper.git
 cd bao-wrapper
 git checkout --detach "$BAO_WRAPPER_VERSION"
