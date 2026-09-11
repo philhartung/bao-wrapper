@@ -61,7 +61,9 @@ Available release assets:
 | macOS arm64 (M-series) | `bao-wrapper-darwin-arm64` |
 | Windows amd64 | `bao-wrapper-windows-amd64.exe` |
 
-The current release workflow publishes `SHA256SUMS` and GitHub build-provenance attestations for the manifest and binaries. Older releases may not include them.
+The current release workflow publishes an SPDX 2.3 JSON SBOM for each binary as `<binary-name>.spdx.json`, including `bao-wrapper-windows-amd64.exe.spdx.json` for Windows. Syft generates each SBOM from the compiled binary, recording its Go modules and standard library version. The pinned SBOM action also pins its default Syft version; Renovate updates the action.
+
+`SHA256SUMS` covers both binaries and SBOMs. GitHub build-provenance attestations cover the manifest, binaries and SBOM files; a separate SBOM attestation binds each SBOM to its binary's digest. Publication requires successful tests, SBOM generation and attestations. Older releases may not include these assets.
 
 ### Verify release provenance
 
@@ -81,6 +83,16 @@ install -m 0755 bao-wrapper-linux-amd64 bao-wrapper
 ```
 
 The attestation verifies the artifact's signed provenance; `SHA256SUMS` makes the release's complete digest set easy to inspect and use in systems that require a pinned checksum.
+
+To download and verify the selected binary's SBOM, using the same release version:
+
+```bash
+curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64.spdx.json"
+gh attestation verify bao-wrapper-linux-amd64.spdx.json --repo philhartung/bao-wrapper
+sha256sum --check --ignore-missing --strict SHA256SUMS
+gh attestation verify bao-wrapper-linux-amd64 --repo philhartung/bao-wrapper \
+  --predicate-type https://spdx.dev/Document/v2.3
+```
 
 ### Build from source
 
