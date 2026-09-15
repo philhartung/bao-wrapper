@@ -27,13 +27,17 @@ import (
 var bootstrap string
 
 const (
-	roleID      = "11111111-2222-3333-4444-555555555555"
-	secretID    = "bao-wrapper-integration-secret-id"
-	password    = "integration-db-password-7c21"
-	extended    = "integration-db-password-7c21-extended-f84a"
-	certificate = "integration-certificate-material-4e98"
-	legacy      = "integration-legacy-token-a913"
-	rendered    = "database_password=" + password + "\nlegacy_token=" + legacy + "\nmode=production\n"
+	roleID            = "11111111-2222-3333-4444-555555555555"
+	secretID          = "bao-wrapper-integration-secret-id"
+	password          = "integration-db-password-7c21"
+	extended          = "integration-db-password-7c21-extended-f84a"
+	certificate       = "integration-certificate-material-4e98"
+	legacy            = "integration-legacy-token-a913"
+	namespace         = "bao-wrapper-test"
+	namespaceRoleID   = "66666666-7777-8888-9999-000000000000"
+	namespaceSecretID = "bao-wrapper-namespace-secret-id"
+	namespacePassword = "integration-namespace-password-b629"
+	rendered          = "database_password=" + password + "\nlegacy_token=" + legacy + "\nmode=production\n"
 )
 
 type suite struct {
@@ -366,7 +370,7 @@ func (c *scenario) finish(p *process, want int) {
 		c.t.Fatalf("wrapper exit=%d, want %d\nstdout:\n%s\nstderr:\n%s", got, want, &c.stdout, &c.stderr)
 	}
 	for _, secret := range []string{
-		password, extended, certificate, legacy, secretID,
+		password, extended, certificate, legacy, secretID, namespacePassword, namespaceSecretID,
 		c.env["BAO_TOKEN"], c.env["BAO_APP_SECRET"],
 		c.env["BAO_UNUSED_FIXTURE"], c.env["VAULT_UNUSED_FIXTURE"], c.env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"],
 	} {

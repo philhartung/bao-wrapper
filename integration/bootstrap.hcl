@@ -116,3 +116,70 @@ EOT
     }
   }
 }
+
+initialize "integration_namespace" {
+  request "create_integration_namespace" {
+    operation = "create"
+    path      = "sys/namespaces/bao-wrapper-test"
+  }
+
+  request "mount_namespace_kv_v2" {
+    operation = "create"
+    path      = "bao-wrapper-test/sys/mounts/kv"
+    data = {
+      type = "kv"
+      options = {
+        version = "2"
+      }
+    }
+  }
+
+  request "seed_namespace_kv_v2" {
+    operation = "create"
+    path      = "bao-wrapper-test/kv/data/integration/app"
+    data = {
+      data = {
+        password = "integration-namespace-password-b629"
+      }
+    }
+  }
+
+  request "create_namespace_policy" {
+    operation = "create"
+    path      = "bao-wrapper-test/sys/policies/acl/bao-wrapper-integration"
+    data = {
+      policy = <<EOT
+path "kv/data/integration/app" {
+  capabilities = ["read"]
+}
+EOT
+    }
+  }
+
+  request "mount_namespace_approle" {
+    operation = "create"
+    path      = "bao-wrapper-test/sys/auth/ci-approle"
+    data = {
+      type = "approle"
+    }
+  }
+
+  request "create_namespace_approle" {
+    operation = "create"
+    path      = "bao-wrapper-test/auth/ci-approle/role/bao-wrapper-integration"
+    data = {
+      role_id        = "66666666-7777-8888-9999-000000000000"
+      token_policies = ["bao-wrapper-integration"]
+      token_ttl      = "5m"
+      token_max_ttl  = "10m"
+    }
+  }
+
+  request "create_namespace_secret_id" {
+    operation = "update"
+    path      = "bao-wrapper-test/auth/ci-approle/role/bao-wrapper-integration/custom-secret-id"
+    data = {
+      secret_id = "bao-wrapper-namespace-secret-id"
+    }
+  }
+}

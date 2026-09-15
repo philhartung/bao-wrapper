@@ -444,13 +444,14 @@ Renovate; neither is fetched as an unpinned value during CI.
 
 Each suite builds its own executables, selects a loopback port, and creates
 isolated storage. A static test-only auto-unseal key and shared declarative
-self-initialization mount KV v1/v2, seed secrets, and create a read-only AppRole;
-no root token or manual bootstrap is needed. Server and child processes have
+self-initialization mount KV v1/v2, seed secrets, and create read-only AppRoles
+in root and test namespaces; no root token or manual bootstrap is needed. Server and child processes have
 bounded lifetimes, temporary resources are cleaned up, and server logs are
 printed on failures. Independent invocations can run concurrently.
 
-The scenarios cover authentication, KV engines, environment and file delivery,
-template masking, credential stripping, argument/stdin forwarding, Unicode and
+The scenarios cover authentication, namespace selection through `BAO_NAMESPACE`
+and `VAULT_NAMESPACE` (including BAO precedence), KV engines, environment and
+file delivery, template masking, credential stripping, argument/stdin forwarding, Unicode and
 space-containing paths, failure handling, cleanup, and token revocation. Unix
 also checks file/directory permissions and SIGINT/SIGTERM forwarding; Windows
 checks file access and cleanup under inherited ACLs. CI runs the suite on all
