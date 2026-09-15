@@ -33,7 +33,7 @@ type SecretValue struct {
 // Run executes args[0] with args[1:] as arguments. It:
 //   - injects resolved secrets into the child environment (env or file)
 //   - masks all secret values in stdout/stderr in real-time
-//   - revokes the Vault token and removes temp files on exit or signal
+//   - revokes the Vault token when a revoker is supplied and removes temp files on exit or signal
 //   - returns the child's exit code, or a nonzero code when cleanup fails after
 //     the child succeeds
 //

@@ -36,6 +36,15 @@ const (
 	githubOIDCMaxResponseBytes = 64 << 10
 )
 
+// tokenOwnership describes whether this invocation created its client token.
+type tokenOwnership uint8
+
+const (
+	tokenAbsent tokenOwnership = iota
+	tokenBorrowed
+	tokenOwned
+)
+
 type onceRevoker struct {
 	once   sync.Once
 	revoke func() error
@@ -90,8 +99,26 @@ func run(args []string) int {
 		secretPrefix = envPrefix
 	}
 	authPath := getEnvWithFallback("BAO_AUTH_PATH", "VAULT_AUTH_PATH")
+	revokePolicy := os.Getenv("BAO_REVOKE_TOKEN")
+	if revokePolicy == "" {
+		revokePolicy = "auto"
+	}
 	runOpts := args[1 : cmdStart-1]
 	for i := 0; i < len(runOpts); i++ {
+		option, inlineValue, hasInlineValue := strings.Cut(runOpts[i], "=")
+		if option == "--revoke-token" {
+			if hasInlineValue {
+				revokePolicy = inlineValue
+			} else {
+				if i+1 >= len(runOpts) {
+					fmt.Fprintln(os.Stderr, "error: --revoke-token requires a value: auto, always, or never")
+					return 1
+				}
+				i++
+				revokePolicy = runOpts[i]
+			}
+			continue
+		}
 		switch runOpts[i] {
 		case "--auth-path":
 			if i+1 >= len(runOpts) {
@@ -121,6 +148,11 @@ func run(args []string) int {
 	}
 	if secretPrefix == "" {
 		fmt.Fprintln(os.Stderr, "error: secret prefix (--secret-prefix or BAO_SECRET_PREFIX) must not be empty")
+		return 1
+	}
+
+	if revokePolicy != "auto" && revokePolicy != "always" && revokePolicy != "never" {
+		fmt.Fprintln(os.Stderr, "error: token revocation policy (--revoke-token or BAO_REVOKE_TOKEN) must be auto, always, or never")
 		return 1
 	}
 
@@ -168,11 +200,11 @@ func run(args []string) int {
 	//   1. BAO_TOKEN / VAULT_TOKEN  – direct token, no login required
 	//   2. BAO_JWT_ROLE + JWT       – JWT/OIDC login (GitHub Actions OIDC auto-detected)
 	//   3. BAO_APP_ID + BAO_APP_SECRET – AppRole login
-	tokenAcquired := false
+	ownership := tokenAbsent
 	switch {
 	case vaultToken != "":
 		client.SetToken(vaultToken)
-		tokenAcquired = true
+		ownership = tokenBorrowed
 	case vaultRole != "":
 		if vaultJWT == "" {
 			jwt, err := fetchGitHubActionsOIDCToken(ctx)
@@ -191,7 +223,7 @@ func run(args []string) int {
 				fmt.Fprintln(os.Stderr, "error: vault login failed:", err)
 				return 1
 			}
-			tokenAcquired = true
+			ownership = tokenOwned
 		}
 	case vaultRoleID != "" && vaultSecretID != "":
 		appRoleAuthPath := authPath
@@ -202,14 +234,14 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, "error: vault approle login failed:", err)
 			return 1
 		}
-		tokenAcquired = true
+		ownership = tokenOwned
 	}
 
-	// The CLI owns the authenticated token lifecycle. Register cleanup before
-	// parsing or fetching secrets so failures before child startup revoke the
-	// token too. RevokeToken supplies a fresh timeout context after signals.
+	// Register policy-selected cleanup before parsing or fetching secrets so
+	// failures before child startup are covered too. Borrowed tokens are preserved
+	// by default. RevokeToken supplies a fresh timeout context after signals.
 	var tokenRevoker runner.Revoker
-	if tokenAcquired {
+	if ownership != tokenAbsent && (revokePolicy == "always" || (revokePolicy == "auto" && ownership == tokenOwned)) {
 		revoker := &onceRevoker{revoke: client.RevokeToken}
 		tokenRevoker = revoker
 		defer func() { _ = revoker.RevokeToken() }()
@@ -267,6 +299,9 @@ Usage:
   bao-wrapper run [options] -- <command> [args...]
 
 Options (bao-wrapper run):
+  --revoke-token <policy>    auto (default), always, or never; also --revoke-token=<policy>
+                             (env: BAO_REVOKE_TOKEN; CLI takes priority)
+                             auto revokes login-issued tokens and preserves supplied tokens
   --auth-path <path>         Authentication mount, e.g. gitlab or auth/gitlab
                              (env: BAO_AUTH_PATH; fallback: VAULT_AUTH_PATH)
   --secret-prefix <prefix>   Prefix used to identify secret variables (default: SECRET_; env: BAO_SECRET_PREFIX)
@@ -275,6 +310,8 @@ Environment variables:
   BAO_ADDR           OpenBao/Vault server address (required; fallback: VAULT_ADDR)
   BAO_NAMESPACE      Vault namespace (optional; fallback: VAULT_NAMESPACE)
   BAO_TOKEN          Direct client token (optional; takes priority over all login methods; fallback: VAULT_TOKEN)
+  BAO_REVOKE_TOKEN   Token cleanup policy: auto (default), always, or never; overridden by --revoke-token
+                     BAO_TOKEN and VAULT_TOKEN are borrowed and preserved under auto
   BAO_AUTH_PATH      JWT or AppRole auth mount (optional; fallback: VAULT_AUTH_PATH;
                      defaults to jwt for JWT and approle for AppRole; overridden by --auth-path)
   BAO_JWT_ROLE       JWT auth role (optional; used when BAO_TOKEN is not set; fallback: VAULT_JWT_ROLE)

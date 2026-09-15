@@ -99,7 +99,7 @@ func TestIntegration(t *testing.T) {
 		for _, path := range report.Files {
 			assertAbsent(t, path)
 		}
-		s.assertToken(t, token, http.StatusForbidden)
+		s.assertToken(t, token, http.StatusOK)
 	})
 	for _, tc := range []struct{ name, ref, status string }{
 		{"fetch-failure", "kv://value@kv/integration/missing", "404"},
@@ -114,7 +114,7 @@ func TestIntegration(t *testing.T) {
 			assertAbsent(t, c.report)
 			assertContains(t, c.stderr.String(), "error: fetch secret NOT_FOUND:")
 			assertContains(t, c.stderr.String(), "returned status "+tc.status)
-			s.assertToken(t, token, http.StatusForbidden)
+			s.assertToken(t, token, http.StatusOK)
 		})
 	}
 	t.Run("invalid-approle", func(t *testing.T) {
@@ -132,9 +132,9 @@ func TestIntegration(t *testing.T) {
 		c.finish(c.start(nil, filepath.Join(c.dir, "does-not-exist")), 1)
 		assertAbsent(t, c.report)
 		assertContains(t, c.stderr.String(), "runner: start process:")
-		s.assertToken(t, token, http.StatusForbidden)
+		s.assertToken(t, token, http.StatusOK)
 	})
-	t.Run("arguments-stdin-and-successful-revocation", func(t *testing.T) {
+	t.Run("arguments-stdin-and-borrowed-token", func(t *testing.T) {
 		c := s.scenario(t)
 		token := s.token(t)
 		c.env["BAO_TOKEN"] = token
@@ -143,8 +143,25 @@ func TestIntegration(t *testing.T) {
 		c.spec.Absent = []string{"BAO_TOKEN"}
 		c.finish(c.start(nil), 0)
 		_ = c.reportData()
-		s.assertToken(t, token, http.StatusForbidden)
+		s.assertToken(t, token, http.StatusOK)
 	})
+	for _, source := range []string{"BAO_TOKEN", "VAULT_TOKEN"} {
+		for _, policy := range []string{"auto", "always", "never"} {
+			t.Run(source+"-"+policy, func(t *testing.T) {
+				c := s.scenario(t)
+				token := s.token(t)
+				c.env[source] = token
+				c.env["BAO_REVOKE_TOKEN"] = policy
+				c.spec.Absent = []string{source, "BAO_REVOKE_TOKEN"}
+				c.finish(c.start(nil), 0)
+				want := http.StatusOK
+				if policy == "always" {
+					want = http.StatusForbidden
+				}
+				s.assertToken(t, token, want)
+			})
+		}
+	}
 	t.Run("namespaces", func(t *testing.T) {
 		for _, tc := range []struct {
 			name string
