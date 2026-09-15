@@ -521,8 +521,8 @@ func TestRunBaoToken_DirectToken(t *testing.T) {
 	if loginCalled {
 		t.Error("login endpoint must not be called when BAO_TOKEN is set")
 	}
-	if revokeCalls != 1 {
-		t.Errorf("expected token to be revoked exactly once, got %d calls", revokeCalls)
+	if revokeCalls != 0 {
+		t.Errorf("expected borrowed token to be preserved, got %d revocation calls", revokeCalls)
 	}
 }
 
@@ -596,7 +596,7 @@ func TestRunBaoToken_RevokeFailureReturnsNonzero(t *testing.T) {
 	t.Setenv(successfulRunChildHelperEnv, "1")
 
 	code := run([]string{
-		"run", "--secret-prefix", "TEST_CLEANUP_SECRET_", "--",
+		"run", "--revoke-token=always", "--secret-prefix", "TEST_CLEANUP_SECRET_", "--",
 		os.Args[0], "-test.run=^TestSuccessfulRunChildHelper$",
 	})
 	if code != 1 {
@@ -642,7 +642,7 @@ func TestRunBareAmbientSecretIsNotRequested(t *testing.T) {
 	}
 }
 
-func TestRunBaoToken_RevokedAfterSecretFetchFailure(t *testing.T) {
+func TestRunBaoToken_PreservedAfterSecretFetchFailure(t *testing.T) {
 	revokeCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -676,8 +676,8 @@ func TestRunBaoToken_RevokedAfterSecretFetchFailure(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	if revokeCalls != 1 {
-		t.Errorf("expected token to be revoked exactly once after fetch failure, got %d calls", revokeCalls)
+	if revokeCalls != 0 {
+		t.Errorf("expected borrowed token to be preserved after fetch failure, got %d revocation calls", revokeCalls)
 	}
 }
 
@@ -1242,8 +1242,8 @@ func TestRun_TemplateErrorsDoNotDiscloseSecrets(t *testing.T) {
 			if code != 1 {
 				t.Errorf("expected exit code 1, got %d", code)
 			}
-			if reads != tt.reads || revocations != 1 {
-				t.Errorf("got %d successful secret reads and %d revocations; want %d and 1", reads, revocations, tt.reads)
+			if reads != tt.reads || revocations != 0 {
+				t.Errorf("got %d successful secret reads and %d revocations; want %d and 0", reads, revocations, tt.reads)
 			}
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
 				t.Errorf("child must not start on template failure; marker stat: %v", err)

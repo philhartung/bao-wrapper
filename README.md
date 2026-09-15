@@ -26,7 +26,7 @@ It fetches secrets at runtime, injects them into the child process's environment
 | Feature | Details |
 |---|---|
 | **Zero external dependencies** | Uses only the Go standard library (`net/http`, `encoding/json`, …) |
-| **Authentication** | Direct token, JWT/OIDC, or AppRole, with token revocation attempted during cleanup |
+| **Authentication** | Direct token, JWT/OIDC, or AppRole, with ownership-aware token cleanup |
 | **Streaming log masking** | Replaces registered plaintext values of at least four bytes with `[MASKED]`, including matches split across writes |
 | **`env` and `file` injection** | Secrets are exposed as env vars or temp files (`0600` on Unix; inherited ACLs on Windows); sensitive config vars are stripped from the child process |
 | **Template engine** | Go `text/template` rendering with in-template `{{ secret "..." }}` lookups and selective masking |
@@ -135,6 +135,7 @@ bao-wrapper run [options] -- <command> [args...]
 | Flag | Default | Description |
 |---|---|---|
 | `--auth-path <path>` | `jwt` for JWT; `approle` for AppRole | Authentication mount used by the selected login method. Accepts a mount name such as `gitlab` or an auth-relative path such as `auth/gitlab`; `/login` is appended automatically. Can also be set via `BAO_AUTH_PATH` (fallback: `VAULT_AUTH_PATH`); the CLI flag takes priority. |
+| `--revoke-token <policy>` | `auto` | Token cleanup policy: `auto` revokes login-issued tokens and preserves supplied tokens; `always` revokes either; `never` preserves either. Also accepts `--revoke-token=<policy>`. Overrides `BAO_REVOKE_TOKEN`. |
 | `--secret-prefix <prefix>` | `SECRET_` | Prefix used to identify secret environment variables. Variables whose name starts with this prefix are parsed as secret references; the prefix is stripped before injecting the value into the child process. Can also be set via the `BAO_SECRET_PREFIX` environment variable; the CLI flag takes priority. |
 
 ### Environment variables
@@ -143,7 +144,7 @@ bao-wrapper run [options] -- <command> [args...]
 |---|---|---|---|
 | `BAO_ADDR` | `VAULT_ADDR` | **yes** | OpenBao/Vault server URL (e.g. `https://openbao.example.com`) |
 | `BAO_NAMESPACE` | `VAULT_NAMESPACE` | no | Namespace |
-| `BAO_TOKEN` | `VAULT_TOKEN` | no | Direct client token; takes priority over all login methods. Use when a token is already available (e.g. local dev, pre-issued tokens). **Cleanup attempts to revoke this token**, including after secret-fetch failures. Supply a disposable token that is not needed by other runs or jobs. |
+| `BAO_TOKEN` | `VAULT_TOKEN` | no | Direct client token; takes priority over all login methods. Use when a token is already available (e.g. local dev, pre-issued tokens). This token is borrowed and preserved by default, including after failures and signals. Use `--revoke-token=always` to opt into revoking a disposable token. |
 | `BAO_AUTH_PATH` | `VAULT_AUTH_PATH` | no | Authentication mount used for JWT or AppRole login. Accepts `gitlab` and `auth/gitlab` forms. Defaults to `jwt` for JWT and `approle` for AppRole; overridden by `--auth-path`. |
 | `BAO_JWT_ROLE` | `VAULT_JWT_ROLE` | no | JWT auth role (used when `BAO_TOKEN` is not set; skips JWT login when omitted) |
 | `BAO_JWT_TOKEN` | `VAULT_JWT_TOKEN` | no | JWT token for authentication (auto-detected from GitHub Actions OIDC when unset) |
@@ -152,9 +153,18 @@ bao-wrapper run [options] -- <command> [args...]
 | `BAO_CACERT` | `VAULT_CACERT` | no | Path to a PEM-encoded CA certificate file (for self-signed or corporate CA) |
 | `BAO_MAX_RESPONSE_BYTES` | `VAULT_MAX_RESPONSE_BYTES` | no | Maximum OpenBao/Vault response body size in bytes (default: 33554432 / 32 MiB) |
 | `BAO_OIDC_MAX_RESPONSE_BYTES` | `VAULT_OIDC_MAX_RESPONSE_BYTES` | no | Maximum GitHub Actions OIDC response body size in bytes (default: 65536 / 64 KiB) |
+| `BAO_REVOKE_TOKEN` | – | no | Token cleanup policy: `auto` (default), `always`, or `never`; overridden by `--revoke-token`. |
 | `BAO_SECRET_PREFIX` | – | no | Prefix for secret variables (default: `SECRET_`); overridden by `--secret-prefix` |
 
 Nonempty `BAO_*` values take priority over their `VAULT_*` fallbacks. Authentication selects the first applicable method: direct token → JWT role (with an explicit JWT or GitHub OIDC) → AppRole credentials. A selected method does not fall back to another method if credentials are missing or login fails. `BAO_AUTH_PATH` is ignored for direct tokens.
+
+Token ownership follows the selected authentication method: tokens supplied through `BAO_TOKEN` or `VAULT_TOKEN` are borrowed; client tokens issued by JWT/OIDC or AppRole login are owned. Under the default `auto` policy, only owned tokens are revoked. This changes the previous behavior that revoked supplied tokens. To retain that behavior for disposable tokens:
+
+```sh
+bao-wrapper run --revoke-token=always -- make test
+```
+
+Policy precedence is CLI → nonempty `BAO_REVOKE_TOKEN` → `auto`. Values must be exactly `auto`, `always`, or `never`; invalid values fail before authentication. There is no `VAULT_REVOKE_TOKEN` fallback. With `never`, even login-issued tokens remain valid until expiry or external revocation.
 
 OpenBao/Vault and GitHub OIDC requests have a 10-second HTTP client timeout and do not follow redirects. Secret reads and token revocation retry network errors and HTTP 502/503/504 up to three times, subject to request deadlines; login and OIDC requests are not automatically retried.
 
@@ -370,7 +380,7 @@ export SECRET_API_KEY="kv://apiKey@kv/services/api"
 bao-wrapper run -- ./start-service.sh
 ```
 
-`bao-wrapper` logs in with AppRole, fetches the secrets, runs the command, and attempts to revoke the client token during cleanup.
+`bao-wrapper` logs in with AppRole, fetches the secrets, runs the command, and attempts to revoke the client token during cleanup under the default `auto` policy.
 
 ---
 
@@ -393,7 +403,7 @@ bao-wrapper run -- ./start-service.sh
 - **Child environment:** Inherited variables starting with `BAO_`, `VAULT_`, `ACTIONS_ID_TOKEN_REQUEST_`, or the configured secret prefix are removed case-insensitively before resolved secrets are added. Other environment variables are inherited.
 - **Masking:** Only exact matches of registered values at least four bytes long are masked in captured stdout and stderr. Full-JSON reads register the JSON string, not its individual fields; templates register only inner lookups. Encoding, escaping, splitting a value between streams, or writing elsewhere can bypass masking. Run trusted child code: masking is not a security boundary. Output may be buffered by up to the longest registered value minus one byte to handle matches split across writes.
 - **Temporary files:** File secrets use an isolated temporary directory (`0700`) and exclusive file creation (`0600`) on Unix. Windows uses inherited ACLs, so protect the account and temporary directory. Cleanup attempts removal on child exit and on SIGINT/SIGTERM, retrying removal after exit if necessary.
-- **Token cleanup:** Once a client token is accepted or acquired, cleanup attempts `POST /v1/auth/token/revoke-self`, including after failures before child startup. SIGINT/SIGTERM starts cleanup while the child is running. Revocation can fail, and forced termination such as SIGKILL prevents cleanup. Use disposable tokens with short TTLs; a lost login response can also leave an issued token unavailable for revocation. Tokens are not renewed.
+- **Token cleanup:** When the revocation policy selects a token for cleanup, cleanup attempts `POST /v1/auth/token/revoke-self`, including after failures before child startup. By default, JWT/OIDC and AppRole client tokens are revoked; supplied `BAO_TOKEN` and `VAULT_TOKEN` credentials are preserved. SIGINT/SIGTERM starts cleanup while the child is running. Revocation can fail, and forced termination such as SIGKILL prevents cleanup. Use short TTLs for login-issued tokens and disposable tokens selected for revocation; a lost login response can also leave an issued token unavailable for revocation. Tokens are not renewed.
 - **Signals and exit status:** The wrapper attempts to forward SIGINT/SIGTERM to its direct child. Process-tree termination and shutdown deadlines are the CI or container runtime's responsibility; Unix-style signal forwarding is not supported on Windows. Normal child exit codes are preserved, but a cleanup failure turns a successful exit into failure; signal termination is reported as exit code 1.
 
 ---
