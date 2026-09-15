@@ -145,5 +145,36 @@ func TestIntegration(t *testing.T) {
 		_ = c.reportData()
 		s.assertToken(t, token, http.StatusForbidden)
 	})
+	t.Run("namespaces", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			env  map[string]string
+		}{
+			{"bao-namespace", map[string]string{"BAO_NAMESPACE": namespace}},
+			{"vault-namespace-fallback", map[string]string{"VAULT_NAMESPACE": namespace}},
+			{"bao-namespace-precedence", map[string]string{"BAO_NAMESPACE": namespace, "VAULT_NAMESPACE": "nonexistent-namespace"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				c := s.scenario(t)
+				for key, value := range tc.env {
+					c.env[key] = value
+				}
+				c.env["BAO_APP_ID"] = namespaceRoleID
+				c.env["BAO_APP_SECRET"] = namespaceSecretID
+				// Keep the root fixture's path: only the namespace selects this value.
+				c.env["SECRET_DB_PASSWORD"] = "kv://password@kv/integration/app"
+				c.spec = probe.Spec{
+					Env:    map[string]string{"DB_PASSWORD": namespacePassword},
+					Absent: []string{"BAO_NAMESPACE", "VAULT_NAMESPACE", "BAO_APP_ID", "BAO_APP_SECRET"},
+					Stdout: "namespace-password=${DB_PASSWORD}\n",
+					Stderr: "namespace-password=${DB_PASSWORD}\n",
+				}
+				c.finish(c.start(nil), 0)
+				_ = c.reportData()
+				assertContains(t, c.stdout.String(), "namespace-password=[MASKED]")
+				assertContains(t, c.stderr.String(), "namespace-password=[MASKED]")
+			})
+		}
+	})
 	runSignalTests(t, s)
 }
