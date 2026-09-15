@@ -38,10 +38,10 @@ func TestTokenPolicyLifecycle(t *testing.T) {
 						case "/v1/auth/jwt/login", "/v1/auth/approle/login":
 							logins++
 							if source == "failed-login" {
-								http.Error(w, "denied", 403)
+								http.Error(w, "denied", http.StatusForbidden)
 								return
 							}
-							fmt.Fprint(w, `{"auth":{"client_token":"issued-token"}}`)
+							_, _ = fmt.Fprint(w, `{"auth":{"client_token":"issued-token"}}`)
 						case "/v1/auth/token/revoke-self":
 							revocations++
 							want := "issued-token"
@@ -51,7 +51,7 @@ func TestTokenPolicyLifecycle(t *testing.T) {
 							if got := r.Header.Get("X-Vault-Token"); got != want {
 								t.Errorf("revoked token %q, want %q", got, want)
 							}
-							w.WriteHeader(204)
+							w.WriteHeader(http.StatusNoContent)
 						default:
 							http.NotFound(w, r)
 						}
@@ -139,7 +139,7 @@ func TestTokenPolicyOptions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requests := 0
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++; w.WriteHeader(204) }))
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++; w.WriteHeader(http.StatusNoContent) }))
 			defer srv.Close()
 			tokenPolicyEnv(t, srv.URL)
 			t.Setenv("BAO_TOKEN", "borrowed")
