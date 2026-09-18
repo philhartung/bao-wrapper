@@ -336,7 +336,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       BAO_ADDR: "https://vault.example.com"
       BAO_NAMESPACE: "mynamespace"
