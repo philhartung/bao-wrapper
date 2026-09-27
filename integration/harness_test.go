@@ -132,8 +132,7 @@ func newSuite(t *testing.T) *suite {
 			t.Fatal(err)
 		}
 		s.addr = "http://" + addr
-		config := fmt.Sprintf(`disable_mlock = true
-disable_clustering = true
+		config := fmt.Sprintf(`disable_clustering = true
 api_addr = %q
 listener "tcp" {
   address = %q
