@@ -9,7 +9,7 @@ listener "tcp" {
   tls_disable = true
 }
 
-storage "file" {
+storage "pebbledb" {
   path = "/openbao/data"
 }
 

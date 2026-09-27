@@ -138,7 +138,7 @@ listener "tcp" {
   address = %q
   tls_disable = true
 }
-storage "file" {
+storage "pebbledb" {
   path = %q
 }
 seal "static" {
