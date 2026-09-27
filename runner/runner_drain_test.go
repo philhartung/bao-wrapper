@@ -59,8 +59,12 @@ func TestDrainHelper(t *testing.T) {
 		}
 	}
 	// The final bytes remain in the masker's overlap buffer until Flush.
-	fmt.Fprint(os.Stdout, "stdout: drain-secret tail")
-	fmt.Fprint(os.Stderr, "stderr: drain-secret tail")
+	if _, err := fmt.Fprint(os.Stdout, "stdout: drain-secret tail"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprint(os.Stderr, "stderr: drain-secret tail"); err != nil {
+		t.Fatal(err)
+	}
 	exitCode, err := strconv.Atoi(os.Getenv("DRAIN_EXIT_CODE"))
 	if err != nil {
 		t.Fatal(err)
@@ -118,12 +122,20 @@ func TestRunBoundsInheritedOutputDrain(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer stdout.Close()
+			defer func() {
+				if err := stdout.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
 			stderr, err := os.CreateTemp(dir, "stderr-")
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer stderr.Close()
+			defer func() {
+				if err := stderr.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
 			oldOut, oldErr := os.Stdout, os.Stderr
 			os.Stdout, os.Stderr = stdout, stderr
 			defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
