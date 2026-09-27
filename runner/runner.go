@@ -13,10 +13,15 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/philhartung/bao-wrapper/masker"
 	"github.com/philhartung/bao-wrapper/parser"
 )
+
+// outputDrainTimeout bounds waiting for inherited output pipes after the direct
+// child exits. Descendants may lose output once this deadline expires.
+const outputDrainTimeout = time.Second
 
 // Revoker is implemented by api.Client so the runner can revoke the token
 // without importing the api package directly.
@@ -34,8 +39,9 @@ type SecretValue struct {
 //   - injects resolved secrets into the child environment (env or file)
 //   - masks all secret values in stdout/stderr in real-time
 //   - revokes the Vault token when a revoker is supplied and removes temp files on exit or signal
-//   - returns the child's exit code, or a nonzero code when cleanup fails after
-//     the child succeeds
+//   - drains output for up to one second after the direct child exits
+//   - returns the child's exit code, or a nonzero code when cleanup fails or
+//     output draining times out after the child succeeds
 //
 // secretPrefix is the env-var prefix used to identify secret variables (e.g.
 // "SECRET_"). It is stripped from the child environment to prevent leakage.
@@ -143,6 +149,7 @@ func runWithCleanup(
 	cmd.Stdout = outWriter
 	cmd.Stderr = errWriter
 	cmd.Stdin = os.Stdin
+	cmd.WaitDelay = outputDrainTimeout
 
 	// Revoke the token and unlink temporary secrets as soon as a shutdown signal
 	// arrives. Process-tree enforcement is deliberately left to the CI/container
@@ -159,6 +166,7 @@ waitLoop:
 	for {
 		select {
 		case waitErr = <-doneCh:
+			startCleanup()
 			break waitLoop
 		case sig := <-sigCh:
 			startCleanup()
