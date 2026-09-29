@@ -46,8 +46,8 @@ This README describes the current source. Published releases may differ; build f
 # Linux amd64; pin the release version and its verified checksum.
 BAO_WRAPPER_VERSION=v0.7.0
 BAO_WRAPPER_SHA256='a5501404e717b4fd39b5597c5f390019c6656543112f5079c2fbac0368fbff17'
-curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64"
-printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper-linux-amd64 | sha256sum --check --strict
+curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" &&
+printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper-linux-amd64 | sha256sum --check --strict &&
 install -m 0755 bao-wrapper-linux-amd64 bao-wrapper
 ```
 
@@ -72,13 +72,13 @@ For releases containing `SHA256SUMS`, download the manifest and selected binary 
 ```bash
 BAO_WRAPPER_VERSION=v0.7.0
 BAO_WRAPPER_SHA256='a5501404e717b4fd39b5597c5f390019c6656543112f5079c2fbac0368fbff17'
-curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/SHA256SUMS"
-curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64"
+curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/SHA256SUMS" &&
+curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" &&
 
-gh attestation verify SHA256SUMS --repo philhartung/bao-wrapper
-gh attestation verify bao-wrapper-linux-amd64 --repo philhartung/bao-wrapper
-sha256sum --check --ignore-missing --strict SHA256SUMS
-printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper-linux-amd64 | sha256sum --check --strict
+gh attestation verify SHA256SUMS --repo philhartung/bao-wrapper &&
+gh attestation verify bao-wrapper-linux-amd64 --repo philhartung/bao-wrapper &&
+sha256sum --check --ignore-missing --strict SHA256SUMS &&
+printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper-linux-amd64 | sha256sum --check --strict &&
 install -m 0755 bao-wrapper-linux-amd64 bao-wrapper
 ```
 
@@ -87,9 +87,9 @@ The attestation verifies the artifact's signed provenance; `SHA256SUMS` makes th
 To download and verify the selected binary's SBOM, using the same release version:
 
 ```bash
-curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64.spdx.json"
-gh attestation verify bao-wrapper-linux-amd64.spdx.json --repo philhartung/bao-wrapper
-sha256sum --check --ignore-missing --strict SHA256SUMS
+curl -fsSLO "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64.spdx.json" &&
+gh attestation verify bao-wrapper-linux-amd64.spdx.json --repo philhartung/bao-wrapper &&
+sha256sum --check --ignore-missing --strict SHA256SUMS &&
 gh attestation verify bao-wrapper-linux-amd64 --repo philhartung/bao-wrapper \
   --predicate-type https://spdx.dev/Document/v2.3
 ```
@@ -309,9 +309,9 @@ build:
       BAO_WRAPPER_SHA256='a5501404e717b4fd39b5597c5f390019c6656543112f5079c2fbac0368fbff17'
       curl -fsSL \
         "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
-        -o /usr/local/bin/bao-wrapper
-      printf '%s  %s\n' "$BAO_WRAPPER_SHA256" /usr/local/bin/bao-wrapper | sha256sum --check --strict
-      chmod +x /usr/local/bin/bao-wrapper
+        -o bao-wrapper-linux-amd64 &&
+      printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper-linux-amd64 | sha256sum --check --strict &&
+      install -m 0755 bao-wrapper-linux-amd64 /usr/local/bin/bao-wrapper || exit 1
   script:
     - bao-wrapper run -- npm run build
 ```
@@ -352,9 +352,9 @@ jobs:
           BAO_WRAPPER_SHA256='a5501404e717b4fd39b5597c5f390019c6656543112f5079c2fbac0368fbff17'
           curl -fsSL \
             "https://github.com/philhartung/bao-wrapper/releases/download/${BAO_WRAPPER_VERSION}/bao-wrapper-linux-amd64" \
-            -o bao-wrapper
-          printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper | sha256sum --check --strict
-          sudo install -m 0755 bao-wrapper /usr/local/bin/bao-wrapper
+            -o bao-wrapper-linux-amd64 &&
+          printf '%s  %s\n' "$BAO_WRAPPER_SHA256" bao-wrapper-linux-amd64 | sha256sum --check --strict &&
+          sudo install -m 0755 bao-wrapper-linux-amd64 /usr/local/bin/bao-wrapper || exit 1
 
       - name: Build
         run: bao-wrapper run -- npm run build
