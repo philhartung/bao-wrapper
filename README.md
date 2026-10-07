@@ -290,7 +290,7 @@ stages:
 
 build:
   stage: build
-  image: node:24-bookworm@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4
+  image: node:24-bookworm@sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0
   id_tokens:
     BAO_JWT_TOKEN:
       aud: https://vault.example.com
