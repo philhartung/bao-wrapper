@@ -82,8 +82,8 @@
       "automerge": true
     },
     {
-      "description": "Bump the minimum Go version and keep CI Go versions in sync",
-      "matchManagers": ["gomod", "github-actions"],
+      "description": "Bump the minimum Go version used by the module and CI",
+      "matchManagers": ["gomod"],
       "matchDepNames": ["go"],
       "rangeStrategy": "bump",
       "groupName": "Go"
