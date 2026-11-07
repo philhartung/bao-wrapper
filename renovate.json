@@ -78,7 +78,10 @@
   ],
   "packageRules": [
     {
-      "matchPackageNames": ["philhartung/bao-wrapper"],
+      "description": "Automerge README updates in their own branches, separate from shared code and CI updates",
+      "matchFileNames": ["README.md"],
+      "additionalBranchPrefix": "readme-",
+      "commitMessageSuffix": "in README",
       "automerge": true
     },
     {
