@@ -336,3 +336,115 @@ func TestKVVersionForEngine(t *testing.T) {
 		})
 	}
 }
+
+func TestParseValue_AdditionalForms(t *testing.T) {
+	for _, tc := range []struct {
+		name, input         string
+		engine, field, path string
+		secretType          parser.SecretType
+	}{
+		{"file type without field", "kv://:file@kv/app", "kv", "", "kv/app", parser.TypeFile},
+		{"empty type keeps default", "kv://password:@kv/app", "kv", "password", "kv/app", parser.TypeEnv},
+		{"percent-encoded field", "kv://db%2Fpass%40word%3Ax@kv/app", "kv", "db/pass@word:x", "kv/app", parser.TypeEnv},
+		{"percent-encoded path", "kv://password@kv/my%20app/db", "kv", "password", "kv/my app/db", parser.TypeEnv},
+		{"unicode path", "kv://password@kv/ünïcode/日本語", "kv", "password", "kv/ünïcode/日本語", parser.TypeEnv},
+		{"percent-encoded unicode field", "kv://p%C3%A4sswort@kv/app", "kv", "pässwort", "kv/app", parser.TypeEnv},
+		{"mount only", "legacy://token@kvv1", "legacy", "token", "kvv1", parser.TypeEnv},
+		{"deep path", "kv://kv/a/b/c/d", "kv", "", "kv/a/b/c/d", parser.TypeEnv},
+		{"mixed-case mount is preserved", "kv://Password@KV/MyApp", "kv", "Password", "KV/MyApp", parser.TypeEnv},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SECRET_TEST", tc.input)
+			refs, err := parser.ParseEnv("SECRET_")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			ref := findRef(refs, "TEST")
+			if ref == nil {
+				t.Fatal("expected TEST ref")
+			}
+			if ref.Engine != tc.engine || ref.Field != tc.field || ref.Path != tc.path || ref.Type != tc.secretType {
+				t.Errorf("got engine=%q field=%q path=%q type=%q, want engine=%q field=%q path=%q type=%q",
+					ref.Engine, ref.Field, ref.Path, ref.Type, tc.engine, tc.field, tc.path, tc.secretType)
+			}
+		})
+	}
+}
+
+// Only an exact, lower-case supported scheme marks a value as a reference.
+// Everything else is treated as an ambient value and skipped without error.
+func TestParseEnv_NonReferencesAreSkipped(t *testing.T) {
+	for _, value := range []string{
+		"KV://password@kv/app", "Kv://kv/app", "vault://kv/app", "https://example.com/kv://x",
+		" kv://password@kv/app", `"kv://password@kv/app"`, "kv:/kv/app", "kv:kv/app", "kv", "",
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("SECRET_TEST", value)
+			refs, err := parser.ParseEnv("SECRET_")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if findRef(refs, "TEST") != nil {
+				t.Fatalf("%q was treated as a secret reference", value)
+			}
+		})
+	}
+}
+
+// The prefix match is exact and case-sensitive, and a custom prefix replaces
+// the default one.
+func TestParseEnv_PrefixMatching(t *testing.T) {
+	t.Setenv("SECRET_DEFAULT", "kv://kv/default")
+	t.Setenv("secret_lower", "kv://kv/lower")
+	t.Setenv("MY_SECRET_INNER", "kv://kv/inner")
+	t.Setenv("CUSTOM_VALUE", "kv://kv/custom")
+
+	refs, err := parser.ParseEnv("SECRET_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findRef(refs, "DEFAULT") == nil {
+		t.Error("SECRET_DEFAULT was not discovered")
+	}
+	for _, name := range []string{"lower", "INNER", "VALUE"} {
+		if findRef(refs, name) != nil {
+			t.Errorf("%s must not match the SECRET_ prefix", name)
+		}
+	}
+
+	refs, err = parser.ParseEnv("CUSTOM_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findRef(refs, "VALUE") == nil || findRef(refs, "DEFAULT") != nil {
+		t.Errorf("custom prefix discovery is wrong: %+v", refs)
+	}
+}
+
+func TestParseTemplateSecretURL_AdditionalForms(t *testing.T) {
+	for _, tc := range []struct {
+		input               string
+		engine, field, path string
+	}{
+		{"password@kv/app", "kv", "password", "kv/app"},
+		{"kv/app", "kv", "", "kv/app"},
+		{"legacy://kvv1/app", "legacy", "", "kvv1/app"},
+		{"kv://db%20pass@kv/my%20app", "kv", "db pass", "kv/my app"},
+	} {
+		ref, err := parser.ParseTemplateSecretURL(tc.input)
+		if err != nil {
+			t.Errorf("%q: %v", tc.input, err)
+			continue
+		}
+		if ref.Engine != tc.engine || ref.Field != tc.field || ref.Path != tc.path || ref.EnvName != "" {
+			t.Errorf("%q: got %+v", tc.input, ref)
+		}
+	}
+	for _, input := range []string{"template://tpl@kv/app", "vault://kv/app", "kv://f:env@kv/app", "kv://f:@kv/app", "kv://kv/app?version=2", "kv://kv/app?"} {
+		if _, err := parser.ParseTemplateSecretURL(input); err == nil {
+			t.Errorf("%q: expected an error", input)
+		} else if strings.Contains(err.Error(), input) {
+			t.Errorf("%q: error exposes the reference: %v", input, err)
+		}
+	}
+}

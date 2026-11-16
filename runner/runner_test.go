@@ -9,8 +9,6 @@ import (
 	"github.com/philhartung/bao-wrapper/parser"
 )
 
-const successfulChildHelperEnv = "GO_WANT_BAO_WRAPPER_SUCCESSFUL_CHILD"
-
 type failingRevoker struct {
 	err error
 }
@@ -19,18 +17,11 @@ func (revoker failingRevoker) RevokeToken() error {
 	return revoker.err
 }
 
-func TestSuccessfulChildHelper(t *testing.T) {
-	if os.Getenv(successfulChildHelperEnv) == "" {
-		return
-	}
-}
-
 func TestRunReturnsNonzeroWhenRevocationFailsAfterSuccessfulChild(t *testing.T) {
-	t.Setenv(successfulChildHelperEnv, "1")
 	revokeErr := errors.New("revocation failed")
 
 	exitCode, err := Run(
-		[]string{os.Args[0], "-test.run=^TestSuccessfulChildHelper$"},
+		helperCommand("exit"),
 		nil,
 		failingRevoker{err: revokeErr},
 		"SECRET_",
@@ -45,11 +36,10 @@ func TestRunReturnsNonzeroWhenRevocationFailsAfterSuccessfulChild(t *testing.T) 
 }
 
 func TestRunReturnsNonzeroWhenTempRemovalFailsAfterSuccessfulChild(t *testing.T) {
-	t.Setenv(successfulChildHelperEnv, "1")
 	removeErr := errors.New("temporary-file removal failed")
 
 	exitCode, err := runWithCleanup(
-		[]string{os.Args[0], "-test.run=^TestSuccessfulChildHelper$"},
+		helperCommand("exit"),
 		[]SecretValue{{
 			Ref:   parser.SecretRef{Type: parser.TypeFile, EnvName: "TEST_SECRET_FILE"},
 			Value: "temporary secret",

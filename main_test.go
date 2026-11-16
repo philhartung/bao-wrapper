@@ -25,14 +25,6 @@ import (
 	"github.com/philhartung/bao-wrapper/api"
 )
 
-const successfulRunChildHelperEnv = "GO_WANT_BAO_WRAPPER_SUCCESSFUL_RUN_CHILD"
-
-func TestSuccessfulRunChildHelper(t *testing.T) {
-	if os.Getenv(successfulRunChildHelperEnv) == "" {
-		return
-	}
-}
-
 func TestRunVersion(t *testing.T) {
 	for _, arg := range []string{"version", "-v", "--version"} {
 		t.Run(arg, func(t *testing.T) {
@@ -518,7 +510,7 @@ func TestRunBaoToken_DirectToken(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
 	t.Setenv("SECRET_DB_PASS", "kv://password@kv/myapp/db")
 
-	code := run([]string{"run", "--", "env"})
+	code := run([]string{"run", "--", os.Args[0], helperFlag + "exit"})
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d", code)
 	}
@@ -597,11 +589,10 @@ func TestRunBaoToken_RevokeFailureReturnsNonzero(t *testing.T) {
 	t.Setenv("VAULT_CACERT", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
-	t.Setenv(successfulRunChildHelperEnv, "1")
 
 	code := run([]string{
 		"run", "--revoke-token=always", "--secret-prefix", "TEST_CLEANUP_SECRET_", "--",
-		os.Args[0], "-test.run=^TestSuccessfulRunChildHelper$",
+		os.Args[0], helperFlag + "exit",
 	})
 	if code != 1 {
 		t.Fatalf("expected exit code 1 when token revocation fails, got %d", code)
@@ -639,11 +630,10 @@ func TestRunBaoToken_RejectedRevocationKeepsSuccessfulExit(t *testing.T) {
 	t.Setenv("VAULT_CACERT", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
-	t.Setenv(successfulRunChildHelperEnv, "1")
 
 	code := run([]string{
 		"run", "--revoke-token=always", "--secret-prefix", "TEST_CLEANUP_SECRET_", "--",
-		os.Args[0], "-test.run=^TestSuccessfulRunChildHelper$",
+		os.Args[0], helperFlag + "exit",
 	})
 	if code != 0 {
 		t.Fatalf("expected exit code 0 when the token is already rejected, got %d", code)
@@ -702,7 +692,7 @@ func TestRunBareAmbientSecretIsNotRequested(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
 	t.Setenv("SECRET_AMBIENT", "hunter2")
 
-	if code := run([]string{"run", "--", "true"}); code != 0 {
+	if code := run([]string{"run", "--", os.Args[0], helperFlag + "exit"}); code != 0 {
 		t.Fatalf("expected exit code 0, got %d", code)
 	}
 	if len(unexpectedRequests) != 0 {
@@ -791,7 +781,7 @@ func TestRunVaultToken_FallbackToken(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
 	t.Setenv("SECRET_DB_PASS", "kv://password@kv/myapp/db")
 
-	code := run([]string{"run", "--", "env"})
+	code := run([]string{"run", "--", os.Args[0], helperFlag + "exit"})
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d", code)
 	}
@@ -839,7 +829,7 @@ func TestRunBaoToken_PriorityOverJWT(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
 	t.Setenv("SECRET_DB_PASS", "kv://password@kv/myapp/db")
 
-	code := run([]string{"run", "--", "env"})
+	code := run([]string{"run", "--", os.Args[0], helperFlag + "exit"})
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d", code)
 	}
@@ -887,7 +877,7 @@ func TestRunBaoToken_PriorityOverAppRole(t *testing.T) {
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
 	t.Setenv("SECRET_DB_PASS", "kv://password@kv/myapp/db")
 
-	code := run([]string{"run", "--", "env"})
+	code := run([]string{"run", "--", os.Args[0], helperFlag + "exit"})
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d", code)
 	}
@@ -970,7 +960,6 @@ func TestRun_CustomAuthPath(t *testing.T) {
 			t.Setenv("VAULT_CACERT", "")
 			t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 			t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
-			t.Setenv(successfulRunChildHelperEnv, "1")
 
 			switch tt.authMethod {
 			case "jwt":
@@ -987,7 +976,7 @@ func TestRun_CustomAuthPath(t *testing.T) {
 			if tt.cliAuthPath != "" {
 				args = append(args, "--auth-path", tt.cliAuthPath)
 			}
-			args = append(args, "--", os.Args[0], "-test.run=^TestSuccessfulRunChildHelper$")
+			args = append(args, "--", os.Args[0], helperFlag+"exit")
 
 			if code := run(args); code != 0 {
 				t.Fatalf("expected exit code 0, got %d", code)
@@ -1003,13 +992,13 @@ func TestRun_CustomAuthPath(t *testing.T) {
 }
 
 func TestRun_AuthPathMissingArg(t *testing.T) {
-	if code := run([]string{"run", "--auth-path", "--", "true"}); code == 0 {
+	if code := run([]string{"run", "--auth-path", "--", os.Args[0], helperFlag + "exit"}); code == 0 {
 		t.Error("expected non-zero exit code when --auth-path has no argument")
 	}
 }
 
 func TestRun_AuthPathEmpty(t *testing.T) {
-	if code := run([]string{"run", "--auth-path", "", "--", "true"}); code == 0 {
+	if code := run([]string{"run", "--auth-path", "", "--", os.Args[0], helperFlag + "exit"}); code == 0 {
 		t.Error("expected non-zero exit code when --auth-path is empty")
 	}
 }
@@ -1052,7 +1041,7 @@ func TestRun_CustomSecretPrefix(t *testing.T) {
 	t.Setenv("MYSECRET_DB_PASS", "kv://password@kv/myapp/db")
 	t.Setenv("SECRET_DB_PASS", "") // ensure the default prefix is not matched
 
-	code := run([]string{"run", "--secret-prefix", "MYSECRET_", "--", "env"})
+	code := run([]string{"run", "--secret-prefix", "MYSECRET_", "--", os.Args[0], helperFlag + "exit"})
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d", code)
 	}
@@ -1066,7 +1055,7 @@ func TestRun_SecretPrefixMissingArg(t *testing.T) {
 
 	// --secret-prefix with no following value before --: the flag parser
 	// consumes "--" as the prefix value, leaving no separator, so run returns an error.
-	code := run([]string{"run", "--secret-prefix", "--", "env"})
+	code := run([]string{"run", "--secret-prefix", "--", os.Args[0], helperFlag + "exit"})
 	if code == 0 {
 		t.Error("expected non-zero exit code when --secret-prefix has no argument before --")
 	}
@@ -1110,7 +1099,7 @@ func TestRun_SecretPrefixFromEnv(t *testing.T) {
 	t.Setenv("ENVSECRET_DB_PASS", "kv://password@kv/myapp/db")
 	t.Setenv("SECRET_DB_PASS", "") // default prefix must not match
 
-	code := run([]string{"run", "--", "env"})
+	code := run([]string{"run", "--", os.Args[0], helperFlag + "exit"})
 	if code != 0 {
 		t.Errorf("expected exit code 0 when prefix is set via BAO_SECRET_PREFIX, got %d", code)
 	}
@@ -1159,7 +1148,7 @@ func TestRun_SecretPrefixCLIOverridesEnv(t *testing.T) {
 	t.Setenv("WRONG_DB_PASS", "")
 	t.Setenv("SECRET_DB_PASS", "")
 
-	code := run([]string{"run", "--secret-prefix", "CLISECRET_", "--", "env"})
+	code := run([]string{"run", "--secret-prefix", "CLISECRET_", "--", os.Args[0], helperFlag + "exit"})
 	if code != 0 {
 		t.Errorf("expected exit code 0 when CLI --secret-prefix overrides BAO_SECRET_PREFIX, got %d", code)
 	}
@@ -1193,16 +1182,6 @@ func generateSelfSignedCert(t *testing.T) []byte {
 	}
 
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-}
-
-const templateFailureChildMarkerEnv = "GO_WANT_BAO_TEMPLATE_FAILURE_CHILD_MARKER"
-
-func TestTemplateFailureChildHelper(t *testing.T) {
-	if marker := os.Getenv(templateFailureChildMarkerEnv); marker != "" {
-		if err := os.WriteFile(marker, []byte("started"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
 }
 
 func TestRun_TemplateErrorsDoNotDiscloseSecrets(t *testing.T) {
@@ -1287,7 +1266,6 @@ func TestRun_TemplateErrorsDoNotDiscloseSecrets(t *testing.T) {
 			}
 			t.Setenv("TEMPLATE_ERROR_TEST_CFG", "template://template@kv/config")
 			marker := t.TempDir() + "/child-started"
-			t.Setenv(templateFailureChildMarkerEnv, marker)
 
 			stderr, err := os.CreateTemp(t.TempDir(), "stderr")
 			if err != nil {
@@ -1301,7 +1279,7 @@ func TestRun_TemplateErrorsDoNotDiscloseSecrets(t *testing.T) {
 			originalStderr := os.Stderr
 			os.Stderr = stderr
 			defer func() { os.Stderr = originalStderr }()
-			code := run([]string{"run", "--secret-prefix", "TEMPLATE_ERROR_TEST_", "--", os.Args[0], "-test.run=^TestTemplateFailureChildHelper$"})
+			code := run([]string{"run", "--secret-prefix", "TEMPLATE_ERROR_TEST_", "--", os.Args[0], helperFlag + "touch", marker})
 			os.Stderr = originalStderr
 			output, err := os.ReadFile(stderr.Name())
 			if err != nil {

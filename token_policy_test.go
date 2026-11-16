@@ -18,13 +18,6 @@ func tokenPolicyEnv(t *testing.T, addr string) {
 	t.Setenv("BAO_ADDR", addr)
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
 	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
-	t.Setenv(successfulRunChildHelperEnv, "1")
-}
-
-func TestTokenPolicyFailedChild(t *testing.T) {
-	if os.Getenv("GO_WANT_POLICY_FAILED_CHILD") == "1" {
-		os.Exit(23)
-	}
 }
 
 func TestTokenPolicyLifecycle(t *testing.T) {
@@ -70,11 +63,10 @@ func TestTokenPolicyLifecycle(t *testing.T) {
 						t.Setenv("BAO_APP_SECRET", "secret")
 					}
 					t.Setenv("POLICY_TEST_SECRET", "")
-					child := []string{os.Args[0], "-test.run=^TestSuccessfulRunChildHelper$"}
+					child := helperCommand("exit")
 					switch outcome {
 					case "child-failure":
-						t.Setenv("GO_WANT_POLICY_FAILED_CHILD", "1")
-						child = []string{os.Args[0], "-test.run=^TestTokenPolicyFailedChild$"}
+						child = helperCommand("exit", "23")
 					case "start-failure":
 						child = []string{"/nonexistent-bao-policy-child"}
 					case "parse-failure":
@@ -145,7 +137,7 @@ func TestTokenPolicyOptions(t *testing.T) {
 			t.Setenv("BAO_TOKEN", "borrowed")
 			t.Setenv("BAO_REVOKE_TOKEN", tc.env)
 			args := append([]string{"run", "--secret-prefix", "POLICY_OPTIONS_"}, tc.opts...)
-			args = append(args, "--", os.Args[0], "-test.run=^TestSuccessfulRunChildHelper$")
+			args = append(args, "--", os.Args[0], helperFlag+"exit")
 			want := 0
 			if tc.invalid {
 				want = 1

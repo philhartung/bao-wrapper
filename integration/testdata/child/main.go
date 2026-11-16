@@ -107,6 +107,7 @@ func run() error {
 	if err := writeReport(os.Args[2], report); err != nil {
 		return err
 	}
+	time.Sleep(time.Duration(spec.DelayMillis) * time.Millisecond)
 	if spec.Signal {
 		return waitForSignal(os.Args[2])
 	}

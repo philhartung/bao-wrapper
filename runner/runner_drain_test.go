@@ -16,34 +16,36 @@ import (
 
 const drainHelperEnv = "GO_WANT_BAO_WRAPPER_DRAIN_HELPER"
 
-// TestDrainHelper runs either the direct child or its pipe-holding descendant.
+func init() { helpers["drain"] = helperDrain }
+
+// helperDrain runs either the direct child or its pipe-holding descendant.
 // The descendant stays alive until the test explicitly releases it.
-func TestDrainHelper(t *testing.T) {
+func helperDrain([]string) int {
 	mode := os.Getenv(drainHelperEnv)
-	if mode == "" {
-		return
-	}
 	dir := os.Getenv("DRAIN_TEST_DIR")
-	writeMarker := func(name, value string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
-			t.Fatal(err)
-		}
+	writeMarker := func(name, value string) bool {
+		return os.WriteFile(filepath.Join(dir, name), []byte(value), 0600) == nil
 	}
 	if mode == "descendant" {
-		writeMarker("ready", "ready")
-		waitForDrainMarker(t, filepath.Join(dir, "release"), 30*time.Second)
-		writeMarker("finished", "finished")
-		os.Exit(0)
+		if !writeMarker("ready", "ready") || !drainMarkerExists(filepath.Join(dir, "release"), 30*time.Second) {
+			return 2
+		}
+		if !writeMarker("finished", "finished") {
+			return 2
+		}
+		return 0
 	}
 
-	writeMarker("secret-path", os.Getenv("DRAIN_SECRET_FILE"))
+	if !writeMarker("secret-path", os.Getenv("DRAIN_SECRET_FILE")) {
+		return 2
+	}
 	stream := os.Getenv("DRAIN_STREAM")
 	if stream != "none" {
 		if err := os.Setenv(drainHelperEnv, "descendant"); err != nil {
-			t.Fatal(err)
+			return 2
 		}
-		cmd := exec.Command(os.Args[0], "-test.run=^TestDrainHelper$")
+		argv := helperCommand("drain")
+		cmd := exec.Command(argv[0], argv[1:]...)
 		if stream == "stdout" || stream == "both" {
 			cmd.Stdout = os.Stdout
 		}
@@ -51,37 +53,44 @@ func TestDrainHelper(t *testing.T) {
 			cmd.Stderr = os.Stderr
 		}
 		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
+			return 2
 		}
-		waitForDrainMarker(t, filepath.Join(dir, "ready"), 5*time.Second)
+		if !drainMarkerExists(filepath.Join(dir, "ready"), 5*time.Second) {
+			return 2
+		}
 		if err := cmd.Process.Release(); err != nil {
-			t.Fatal(err)
+			return 2
 		}
 	}
-	// The final bytes remain in the masker's overlap buffer until Flush.
 	if _, err := fmt.Fprint(os.Stdout, "stdout: drain-secret tail"); err != nil {
-		t.Fatal(err)
+		return 2
 	}
 	if _, err := fmt.Fprint(os.Stderr, "stderr: drain-secret tail"); err != nil {
-		t.Fatal(err)
+		return 2
 	}
 	exitCode, err := strconv.Atoi(os.Getenv("DRAIN_EXIT_CODE"))
 	if err != nil {
-		t.Fatal(err)
+		return 2
 	}
-	os.Exit(exitCode)
+	return exitCode
+}
+
+func drainMarkerExists(path string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
 }
 
 func waitForDrainMarker(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !drainMarkerExists(path, timeout) {
+		t.Fatalf("timed out waiting for %s", path)
 	}
-	t.Fatalf("timed out waiting for %s", path)
 }
 
 type drainRevoker struct {
@@ -153,7 +162,7 @@ func TestRunBoundsInheritedOutputDrain(t *testing.T) {
 			done := make(chan result, 1)
 			go func() {
 				code, err := runWithCleanup(
-					[]string{os.Args[0], "-test.run=^TestDrainHelper$"},
+					helperCommand("drain"),
 					[]SecretValue{{Ref: parser.SecretRef{Type: parser.TypeFile, EnvName: "DRAIN_SECRET_FILE"}, Value: "drain-secret"}},
 					revoker, "SECRET_", make(chan os.Signal),
 					func(path string) error { return errors.Join(os.RemoveAll(path), removeErr) },

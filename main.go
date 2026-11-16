@@ -37,6 +37,11 @@ const (
 	githubOIDCMaxResponseBytes = 64 << 10
 )
 
+// githubOIDCTransport is the transport for GitHub Actions OIDC requests. It is
+// nil in production, which selects http.DefaultTransport and system trust;
+// tests replace it to trust an httptest TLS certificate.
+var githubOIDCTransport http.RoundTripper
+
 // tokenOwnership describes whether this invocation created its client token.
 type tokenOwnership uint8
 
@@ -400,7 +405,7 @@ func fetchGitHubActionsOIDCToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return requestGitHubActionsOIDCTokenWithLimit(ctx, requestURL, requestToken, nil, maxResponseBytes)
+	return requestGitHubActionsOIDCTokenWithLimit(ctx, requestURL, requestToken, githubOIDCTransport, maxResponseBytes)
 }
 
 // requestGitHubActionsOIDCToken requests a token from a validated GitHub OIDC

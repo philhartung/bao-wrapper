@@ -1,6 +1,7 @@
 # This configuration is exclusively for local and CI integration tests. The
-# static seal key and AppRole credentials are intentionally public fixtures and
-# must never be reused outside this disposable environment.
+# static seal key, AppRole credentials and JWT verification key are
+# intentionally public fixtures and must never be reused outside this
+# disposable environment.
 
 initialize "secret_engines" {
   request "mount_integration_kv_v2" {
@@ -180,6 +181,71 @@ EOT
     path      = "bao-wrapper-test/auth/ci-approle/role/bao-wrapper-integration/custom-secret-id"
     data = {
       secret_id = "bao-wrapper-namespace-secret-id"
+    }
+  }
+}
+
+initialize "integration_short_lived_tokens" {
+  # Tokens from this role expire while a deliberately slow child is still
+  # running, as happens when a job outlives its token.
+  request "create_short_ttl_approle" {
+    operation = "create"
+    path      = "auth/ci-approle/role/bao-wrapper-short-ttl"
+    data = {
+      role_id        = "22222222-3333-4444-5555-666666666666"
+      token_policies = ["bao-wrapper-integration"]
+      token_ttl      = "1s"
+      token_max_ttl  = "1s"
+    }
+  }
+
+  request "create_short_ttl_secret_id" {
+    operation = "update"
+    path      = "auth/ci-approle/role/bao-wrapper-short-ttl/custom-secret-id"
+    data = {
+      secret_id = "bao-wrapper-short-ttl-secret-id"
+    }
+  }
+}
+
+initialize "integration_jwt" {
+  request "mount_integration_jwt" {
+    operation = "create"
+    path      = "sys/auth/ci-jwt"
+    data = {
+      type = "jwt"
+    }
+  }
+
+  # The native suite generates a signing key per run and supplies its public
+  # half here, so no private key is ever committed.
+  request "configure_integration_jwt" {
+    operation = "update"
+    path      = "auth/ci-jwt/config"
+    data = {
+      jwt_validation_pubkeys = {
+        eval_source     = "env"
+        eval_type       = "string"
+        env_var         = "INTEGRATION_JWT_PUBLIC_KEY"
+        require_present = true
+      }
+      bound_issuer = "https://ci.bao-wrapper.test"
+    }
+  }
+
+  request "create_integration_jwt_role" {
+    operation = "create"
+    path      = "auth/ci-jwt/role/bao-wrapper-integration"
+    data = {
+      role_type       = "jwt"
+      user_claim      = "sub"
+      bound_audiences = ["https://openbao.bao-wrapper.test"]
+      bound_claims = {
+        project_path = "bao-wrapper/integration"
+      }
+      token_policies = ["bao-wrapper-integration"]
+      token_ttl      = "5m"
+      token_max_ttl  = "10m"
     }
   }
 }

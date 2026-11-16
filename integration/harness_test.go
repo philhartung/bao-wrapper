@@ -5,11 +5,20 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +26,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,12 +47,126 @@ const (
 	namespaceRoleID   = "66666666-7777-8888-9999-000000000000"
 	namespaceSecretID = "bao-wrapper-namespace-secret-id"
 	namespacePassword = "integration-namespace-password-b629"
+	shortTTLRoleID    = "22222222-3333-4444-5555-666666666666"
+	shortTTLSecretID  = "bao-wrapper-short-ttl-secret-id"
+	jwtIssuer         = "https://ci.bao-wrapper.test"
+	jwtAudience       = "https://openbao.bao-wrapper.test"
+	jwtProject        = "bao-wrapper/integration"
 	rendered          = "database_password=" + password + "\nlegacy_token=" + legacy + "\nmode=production\n"
 )
 
 type suite struct {
 	addr, wrapper, child string
 	client               *http.Client
+	// tlsAddr is a second, TLS-only listener of the same server; caFile is
+	// the certificate that verifies it.
+	tlsAddr, caFile string
+	// jwtKey signs login tokens for the ci-jwt mount, which is configured with
+	// its public half.
+	jwtKey *ecdsa.PrivateKey
+}
+
+// lockedBuffer collects process output that tests read while the process is
+// still running.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// freeAddr returns a loopback address that was free a moment ago.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return addr
+}
+
+// newServerCertificate writes a self-signed certificate for 127.0.0.1 and its
+// key into dir and returns their paths.
+func newServerCertificate(t *testing.T, dir string) (certFile, keyFile string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "bao-wrapper integration"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile, keyFile = filepath.Join(dir, "server-cert.pem"), filepath.Join(dir, "server-key.pem")
+	mustWrite(t, certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	mustWrite(t, keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+	return certFile, keyFile
+}
+
+// jwt returns an ES256 token for the ci-jwt mount. Entries in overrides
+// replace the default claims; a nil value removes a claim. A nil key selects
+// the key the server trusts.
+func (s *suite) jwt(t *testing.T, key *ecdsa.PrivateKey, overrides map[string]any) string {
+	t.Helper()
+	if key == nil {
+		key = s.jwtKey
+	}
+	now := time.Now()
+	claims := map[string]any{
+		"iss": jwtIssuer, "aud": jwtAudience, "sub": "project_path:" + jwtProject,
+		"project_path": jwtProject, "iat": now.Add(-time.Minute).Unix(), "exp": now.Add(5 * time.Minute).Unix(),
+	}
+	for name, value := range overrides {
+		if value == nil {
+			delete(claims, name)
+		} else {
+			claims[name] = value
+		}
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encode := base64.RawURLEncoding.EncodeToString
+	signingInput := encode([]byte(`{"alg":"ES256","typ":"JWT"}`)) + "." + encode(payload)
+	digest := sha256.Sum256([]byte(signingInput))
+	r, sig, err := ecdsa.Sign(rand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	sig.FillBytes(signature[32:])
+	return signingInput + "." + encode(signature)
 }
 
 type process struct {
@@ -100,9 +224,19 @@ func newSuite(t *testing.T) *suite {
 	if runtime.GOOS == "windows" {
 		ext = ".exe"
 	}
+	jwtKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwtPublicDER, err := x509.MarshalPKIXPublicKey(&jwtKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwtPublicKey := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: jwtPublicDER}))
 	s := &suite{
 		wrapper: filepath.Join(binDir, "bao-wrapper"+ext),
 		child:   filepath.Join(binDir, "child"+ext),
+		jwtKey:  jwtKey,
 		client: &http.Client{
 			Timeout:       2 * time.Second,
 			Transport:     &http.Transport{Proxy: nil},
@@ -123,20 +257,20 @@ func newSuite(t *testing.T) *suite {
 	for attempt := 0; attempt < 3; attempt++ {
 		dir := filepath.Join(root, fmt.Sprintf("server-%d", attempt))
 		mustMkdir(t, dir)
-		listener, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		addr := listener.Addr().String()
-		if err := listener.Close(); err != nil {
-			t.Fatal(err)
-		}
-		s.addr = "http://" + addr
+		addr, tlsAddr := freeAddr(t), freeAddr(t)
+		s.addr, s.tlsAddr = "http://"+addr, "https://"+tlsAddr
+		certFile, keyFile := newServerCertificate(t, dir)
+		s.caFile = certFile
 		config := fmt.Sprintf(`disable_clustering = true
 api_addr = %q
 listener "tcp" {
   address = %q
   tls_disable = true
+}
+listener "tcp" {
+  address = %q
+  tls_cert_file = %q
+  tls_key_file = %q
 }
 storage "pebbledb" {
   path = %q
@@ -145,7 +279,7 @@ seal "static" {
   current_key_id = "bao-wrapper-integration-v1"
   current_key = "env://OPENBAO_STATIC_SEAL_KEY"
 }
-`, s.addr, addr, filepath.ToSlash(filepath.Join(dir, "data")))
+`, s.addr, addr, tlsAddr, filepath.ToSlash(certFile), filepath.ToSlash(keyFile), filepath.ToSlash(filepath.Join(dir, "data")))
 		configPath := filepath.Join(dir, "server.hcl")
 		mustWrite(t, configPath, []byte(config+bootstrap))
 		logPath := filepath.Join(dir, "server.log")
@@ -174,6 +308,7 @@ seal "static" {
 		cmd.Env = cleanEnv(map[string]string{
 			"OPENBAO_STATIC_SEAL_KEY": "0123456789abcdef0123456789abcdef",
 			"INTEGRATION_ROLE_ID":     roleID, "INTEGRATION_SECRET_ID": secretID,
+			"INTEGRATION_JWT_PUBLIC_KEY": jwtPublicKey,
 		})
 		cmd.Stdout, cmd.Stderr = log, log
 		p := startProcess(t, cmd)
@@ -290,7 +425,7 @@ type scenario struct {
 	dir, temp, report string
 	env               map[string]string
 	spec              probe.Spec
-	stdout, stderr    bytes.Buffer
+	stdout, stderr    lockedBuffer
 }
 
 func (s *suite) scenario(t *testing.T) *scenario {
@@ -369,8 +504,8 @@ func (c *scenario) finish(p *process, want int) {
 		c.t.Fatalf("wrapper exit=%d, want %d\nstdout:\n%s\nstderr:\n%s", got, want, &c.stdout, &c.stderr)
 	}
 	for _, secret := range []string{
-		password, extended, certificate, legacy, secretID, namespacePassword, namespaceSecretID,
-		c.env["BAO_TOKEN"], c.env["BAO_APP_SECRET"],
+		password, extended, certificate, legacy, secretID, namespacePassword, namespaceSecretID, shortTTLSecretID,
+		c.env["BAO_TOKEN"], c.env["BAO_APP_SECRET"], c.env["BAO_JWT_TOKEN"], c.env["VAULT_JWT_TOKEN"],
 		c.env["BAO_UNUSED_FIXTURE"], c.env["VAULT_UNUSED_FIXTURE"], c.env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"],
 	} {
 		if secret != "" && (strings.Contains(c.stdout.String(), secret) || strings.Contains(c.stderr.String(), secret)) {

@@ -11,6 +11,9 @@ type Spec struct {
 	Args     []string
 	ExitCode int
 	Signal   bool
+	// DelayMillis keeps the child running after it wrote its output and
+	// report, before it exits or starts waiting for a signal.
+	DelayMillis int
 }
 
 type Report struct {

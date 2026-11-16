@@ -547,3 +547,57 @@ func TestContext_RetryAbortsOnCancellation(t *testing.T) {
 		t.Errorf("expected exactly 1 server call before cancellation aborted retries, got %d", calls)
 	}
 }
+
+// Only 502, 503 and 504 are transient. Other failures, including rate limits
+// and internal errors, are returned after a single attempt for both reads and
+// revocation.
+func TestRetry_OtherStatusesAreNotRetried(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusNotImplemented} {
+		for _, operation := range []string{"read", "revoke"} {
+			t.Run(fmt.Sprintf("%s %d", operation, status), func(t *testing.T) {
+				var calls int32
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					atomic.AddInt32(&calls, 1)
+					w.WriteHeader(status)
+				}))
+				defer srv.Close()
+
+				c := newTestRetryClient(srv.URL)
+				c.SetToken("tok")
+				var err error
+				if operation == "read" {
+					_, err = c.ReadSecret("kv/app", "k", 2)
+				} else {
+					err = c.RevokeToken()
+				}
+				if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("returned status %d", status)) {
+					t.Fatalf("error = %v, want status %d", err, status)
+				}
+				if calls != 1 {
+					t.Errorf("expected a single attempt, got %d", calls)
+				}
+			})
+		}
+	}
+}
+
+// A sustained transient failure on a read is attempted 1 + maxRetries times
+// and the final status is reported.
+func TestRetry_ReadExhaustsRetries(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	c := newTestRetryClient(srv.URL)
+	c.SetToken("tok")
+	_, err := c.ReadSecret("kv/app", "k", 2)
+	if err == nil || !strings.Contains(err.Error(), "returned status 502") {
+		t.Fatalf("error = %v, want the final 502", err)
+	}
+	if want := int32(1 + maxRetries); calls != want {
+		t.Errorf("expected %d attempts, got %d", want, calls)
+	}
+}

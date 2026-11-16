@@ -177,3 +177,95 @@ func TestRender_FetchErrorDoesNotExposeCause(t *testing.T) {
 		t.Fatal("template error must not retain an unsafe cause")
 	}
 }
+
+func render(t *testing.T, template string, secrets map[string]string) (*tmpl.Result, error) {
+	t.Helper()
+	all := map[string]string{"kv/config/tpl": template}
+	for key, value := range secrets {
+		all[key] = value
+	}
+	return tmpl.Render(parser.SecretRef{Engine: "template", Path: "kv/config", Field: "tpl"}, &fakeReader{secrets: all})
+}
+
+// Control structures work, and every lookup is collected for masking,
+// including repeated lookups of the same value.
+func TestRender_LoopsCollectEveryLookup(t *testing.T) {
+	result, err := render(t,
+		`{{ range $i := 3 }}[{{ $i }}:{{ secret "kv://password@kv/db" }}]{{ end }}{{ if true }} api={{ secret "legacy://token@kvv1/api" }}{{ end }}`,
+		map[string]string{"kv/db/password": "db-password-value", "kvv1/api/token": "api-token-value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "[0:db-password-value][1:db-password-value][2:db-password-value] api=api-token-value"; result.Output != want {
+		t.Errorf("output = %q, want %q", result.Output, want)
+	}
+	want := []string{"db-password-value", "db-password-value", "db-password-value", "api-token-value"}
+	if strings.Join(result.InnerSecrets, ",") != strings.Join(want, ",") {
+		t.Errorf("inner secrets = %q, want %q", result.InnerSecrets, want)
+	}
+}
+
+// A transformed value is rendered as the template asks, and the raw value is
+// still registered. The transformed text itself has no masking guarantee,
+// which the README documents.
+func TestRender_TransformedValuesRegisterRawSecret(t *testing.T) {
+	result, err := render(t,
+		`quoted={{ secret "kv://password@kv/db" | printf "%q" }} url={{ secret "kv://password@kv/db" | urlquery }} len={{ len (secret "kv://password@kv/db") }}`,
+		map[string]string{"kv/db/password": "p@ss word/1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `quoted="p@ss word/1" url=p%40ss+word%2F1 len=11`; result.Output != want {
+		t.Errorf("output = %q, want %q", result.Output, want)
+	}
+	if len(result.InnerSecrets) != 3 {
+		t.Fatalf("inner secrets = %q", result.InnerSecrets)
+	}
+	for _, inner := range result.InnerSecrets {
+		if inner != "p@ss word/1" {
+			t.Errorf("registered %q, want the raw value", inner)
+		}
+	}
+}
+
+func TestRender_StaticTemplateHasNoInnerSecrets(t *testing.T) {
+	result, err := render(t, "mode=production\nliteral braces: {{ `{{` }}\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Output != "mode=production\nliteral braces: {{\n" || len(result.InnerSecrets) != 0 {
+		t.Errorf("output = %q, inner secrets = %q", result.Output, result.InnerSecrets)
+	}
+}
+
+// Errors name the stage, the numeric location and a fixed category only. They
+// are printed before masking exists, so they must not carry template text,
+// references or values.
+func TestRender_ErrorsCarryOnlySafeDetails(t *testing.T) {
+	const secretValue = "resolved-secret-value"
+	for name, tc := range map[string]struct {
+		template string
+		want     string
+	}{
+		"parse error":            {"line one\n{{ secret \"kv://password@kv/db\" ", "template: parse failed at line 2"},
+		"unknown function":       {`{{ lookup "kv/db" }}`, "template: parse failed at line 1"},
+		"missing inner secret":   {"ok\n\n{{ secret \"kv://absent@kv/db\" }}", "template: execute failed at line 3, column 3: secret: fetch failed"},
+		"invalid inner engine":   {`{{ secret "template://tpl@kv/other" }}`, "template: execute failed at line 1, column 3: secret: invalid reference"},
+		"inner type selector":    {`{{ secret "kv://password:file@kv/db" }}`, "template: execute failed at line 1, column 3: secret: invalid reference"},
+		"error after a lookup":   {`{{ secret "kv://password@kv/db" }}{{ index "x" 5 }}`, "template: execute failed at line 1, column 37"},
+		"value used as function": {`{{ call (secret "kv://password@kv/db") }}`, "template: execute failed at line 1, column 3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := render(t, tc.template, map[string]string{"kv/db/password": secretValue})
+			if err == nil {
+				t.Fatalf("expected an error, got output %q", result.Output)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("error = %q, want %q", err, tc.want)
+			}
+			if errors.Unwrap(err) != nil {
+				t.Error("error wraps its cause, which may contain template text or values")
+			}
+		})
+	}
+}
