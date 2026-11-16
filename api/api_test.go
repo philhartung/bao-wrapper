@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -610,5 +611,40 @@ func TestRevokeToken(t *testing.T) {
 	}
 	if !called {
 		t.Error("revoke-self endpoint was not called")
+	}
+}
+
+func TestRevokeToken_RejectedToken(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		http.Error(w, `{"errors":["permission denied"]}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := api.New(srv.URL, "")
+	c.SetToken("expired")
+	if err := c.RevokeToken(); !errors.Is(err, api.ErrTokenRejected) {
+		t.Fatalf("RevokeToken error = %v, want ErrTokenRejected", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected a single revocation attempt, got %d", calls)
+	}
+}
+
+func TestRevokeToken_OtherStatusIsNotRejectedToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	c := api.New(srv.URL, "")
+	c.SetToken("tok")
+	err := c.RevokeToken()
+	if err == nil || errors.Is(err, api.ErrTokenRejected) {
+		t.Fatalf("RevokeToken error = %v, want a plain status error", err)
+	}
+	if !strings.Contains(err.Error(), "returned status 400") {
+		t.Fatalf("unexpected error text: %v", err)
 	}
 }
