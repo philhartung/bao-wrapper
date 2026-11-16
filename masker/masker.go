@@ -1,5 +1,8 @@
 // Package masker provides an io.Writer that replaces secret strings with
 // "[MASKED]" in real-time while handling chunk-boundary splits safely.
+// Output is forwarded as soon as it is known not to be part of a secret; only
+// a trailing run of bytes that could still be the beginning of a registered
+// secret is withheld until more input arrives.
 package masker
 
 import (
@@ -17,19 +20,21 @@ const masked = "[MASKED]"
 const minSecretLen = 4
 
 // Writer wraps an underlying io.Writer and replaces all occurrences of
-// registered secrets with "[MASKED]". It maintains a rolling overlap buffer
-// to handle secrets that span write boundaries.
+// registered secrets with "[MASKED]". It retains the undecided tail of the
+// input to handle secrets that span write boundaries.
 type Writer struct {
 	mu      sync.Mutex
 	dst     io.Writer
 	secrets [][]byte
-	// pending holds up to (maxLen-1) raw bytes whose masking cannot be
-	// decided until more input arrives.
+	// pending holds the raw tail of the input whose masking cannot be decided
+	// until more input arrives: it starts at the first position where the
+	// remaining bytes are a proper prefix of a secret, so it is empty unless
+	// the output currently ends in the beginning of one. It is always shorter
+	// than the longest secret.
 	pending []byte
 	// maskRemaining is the number of leading pending bytes already covered
 	// by a mask marker emitted for an overlapping secret span.
 	maskRemaining int
-	maxLen        int
 }
 
 // New creates a Writer that writes masked output to dst.
@@ -39,17 +44,16 @@ func New(dst io.Writer, secrets []string) *Writer {
 	for _, s := range secrets {
 		if len(s) >= minSecretLen {
 			w.secrets = append(w.secrets, []byte(s))
-			if len(s) > w.maxLen {
-				w.maxLen = len(s)
-			}
 		}
 	}
 	w.sortSecrets()
 	return w
 }
 
-// Write implements io.Writer. It buffers up to (maxLen-1) bytes at the end
-// of each write to ensure secrets are not split across chunk boundaries.
+// Write implements io.Writer. Everything that can be decided is written to
+// the underlying writer before Write returns. Bytes are withheld only while
+// the end of the input matches the beginning of a secret, so that a secret
+// split across writes is still masked.
 func (w *Writer) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -72,7 +76,7 @@ func (w *Writer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Flush writes any buffered overlap bytes to the underlying writer.
+// Flush writes any withheld bytes to the underlying writer.
 // Call this after the child process exits.
 func (w *Writer) Flush() error {
 	w.mu.Lock()
@@ -98,28 +102,34 @@ func (w *Writer) AddSecret(s string) {
 	defer w.mu.Unlock()
 	w.secrets = append(w.secrets, []byte(s))
 	w.sortSecrets()
-	if len(s) > w.maxLen {
-		w.maxLen = len(s)
-	}
 }
 
-// process masks the decidable prefix of data. When final is false, it retains
-// enough raw input to detect secrets split across future writes. It checks
-// positions inside an existing masked span so that overlapping matches can
-// extend the span without exposing either secret.
+// process masks the decidable prefix of data. A position is decidable once
+// every secret either fits in the remaining input, and so matches or does not,
+// or has already diverged from it. When final is false, processing stops at
+// the first position where the remaining input is a proper prefix of a secret;
+// the caller retains the input from there. Positions inside an existing masked
+// span are still checked so that overlapping matches can extend the span
+// without exposing either secret.
 func (w *Writer) process(data []byte, final bool) ([]byte, int, int) {
 	out := make([]byte, 0, len(data))
 	pos := 0
 	maskedUntil := w.maskRemaining
 
+scan:
 	for pos < len(data) {
-		if !final && len(data)-pos < w.maxLen {
-			break
-		}
-
+		rest := data[pos:]
 		wasCovered := pos < maskedUntil
+		// Secrets are sorted longest first, so every secret that does not fit
+		// in rest is examined before the first one that does.
 		for _, secret := range w.secrets {
-			if bytes.HasPrefix(data[pos:], secret) {
+			if len(secret) > len(rest) {
+				if !final && bytes.HasPrefix(secret, rest) {
+					break scan
+				}
+				continue
+			}
+			if bytes.HasPrefix(rest, secret) {
 				if end := pos + len(secret); end > maskedUntil {
 					maskedUntil = end
 				}
