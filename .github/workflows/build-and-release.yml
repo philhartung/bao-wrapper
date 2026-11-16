@@ -61,7 +61,40 @@ jobs:
           cache: true
 
       - name: Run tests
-        run: go test -v -race -cover ./...
+        run: go test -v -race -cover "-coverprofile=coverage.out" ./...
+
+      # Unix-only tests make the Linux figure the most complete one, so the
+      # summary and the floor use it. The floor sits below the current total to
+      # catch large drops without blocking ordinary changes.
+      - name: Coverage summary and floor
+        if: startsWith(matrix.os, 'ubuntu')
+        env:
+          COVERAGE_FLOOR: "88"
+        run: |
+          go tool cover -func=coverage.out > coverage.txt
+          total=$(awk '/^total:/ { sub("%", "", $3); print $3 }' coverage.txt)
+          {
+            echo "### Coverage: ${total}% of statements"
+            echo
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          awk -v total="$total" -v floor="$COVERAGE_FLOOR" 'BEGIN {
+            if (total + 0 < floor + 0) {
+              printf "coverage %s%% is below the %s%% floor\n", total, floor
+              exit 1
+            }
+          }'
+
+      # go test accepts a single fuzz target per invocation. Seed corpora
+      # already run as ordinary tests above; this explores beyond them.
+      - name: Fuzz
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          for target in parser:FuzzParseEnv api:FuzzRequestPath template:FuzzRender masker:FuzzWriter; do
+            go test "./${target%%:*}" -run '^$' -fuzz "^${target##*:}\$" -fuzztime 20s
+          done
 
   # Run the OpenBao integration fixture for every workflow event and use it to
   # gate release publication.

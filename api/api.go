@@ -322,6 +322,14 @@ func validateSecretPath(secretPath string, kvVersion int) error {
 	if strings.ContainsAny(secretPath, `\%?#`) || pathpkg.Clean(secretPath) != secretPath {
 		return fmt.Errorf("api: secret path must be canonical")
 	}
+	// path.Clean keeps leading dot segments ("..", "../x", "."), which would
+	// let a request climb out of the intended mount once a proxy or the server
+	// normalizes the URL.
+	for _, segment := range strings.Split(secretPath, "/") {
+		if segment == "." || segment == ".." {
+			return fmt.Errorf("api: secret path must be canonical")
+		}
+	}
 
 	if kvVersion == 1 {
 		prefix, _, _ := strings.Cut(secretPath, "/")

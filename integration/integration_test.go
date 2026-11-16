@@ -3,10 +3,14 @@
 package integration
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/philhartung/bao-wrapper/integration/testdata/probe"
 )
@@ -206,6 +210,112 @@ func TestIntegration(t *testing.T) {
 				assertContains(t, c.stderr.String(), "namespace-password=[MASKED]")
 			})
 		}
+	})
+	t.Run("jwt-login", func(t *testing.T) {
+		jwtScenario := func(t *testing.T) *scenario {
+			c := s.scenario(t)
+			for _, key := range []string{"BAO_AUTH_PATH", "BAO_APP_ID", "BAO_APP_SECRET"} {
+				delete(c.env, key)
+			}
+			c.env["SECRET_DB_PASSWORD"] = "kv://password@kv/integration/app"
+			return c
+		}
+		for _, tc := range []struct {
+			name    string
+			env     map[string]string
+			options []string
+		}{
+			{"mount-name", map[string]string{"BAO_AUTH_PATH": "ci-jwt", "BAO_JWT_ROLE": "bao-wrapper-integration", "BAO_JWT_TOKEN": s.jwt(t, nil, nil)}, nil},
+			{"auth-relative-option", map[string]string{"BAO_JWT_ROLE": "bao-wrapper-integration", "BAO_JWT_TOKEN": s.jwt(t, nil, nil)}, []string{"--auth-path", "auth/ci-jwt"}},
+			{"vault-fallbacks", map[string]string{"VAULT_AUTH_PATH": "ci-jwt", "VAULT_JWT_ROLE": "bao-wrapper-integration", "VAULT_JWT_TOKEN": s.jwt(t, nil, nil)}, nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				c := jwtScenario(t)
+				for key, value := range tc.env {
+					c.env[key] = value
+				}
+				c.spec = probe.Spec{
+					Env:    map[string]string{"DB_PASSWORD": password},
+					Absent: []string{"BAO_JWT_ROLE", "BAO_JWT_TOKEN", "BAO_AUTH_PATH", "VAULT_JWT_ROLE", "VAULT_JWT_TOKEN", "VAULT_AUTH_PATH"},
+					Stdout: "jwt-password=${DB_PASSWORD}\n",
+				}
+				c.finish(c.start(tc.options), 0)
+				_ = c.reportData()
+				assertContains(t, c.stdout.String(), "jwt-password=[MASKED]")
+			})
+		}
+
+		otherKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			name, role, token string
+		}{
+			{"unknown-role", "missing-role", s.jwt(t, nil, nil)},
+			{"expired-token", "bao-wrapper-integration", s.jwt(t, nil, map[string]any{"exp": time.Now().Add(-time.Hour).Unix()})},
+			{"wrong-audience", "bao-wrapper-integration", s.jwt(t, nil, map[string]any{"aud": "https://another-service.test"})},
+			{"wrong-bound-claim", "bao-wrapper-integration", s.jwt(t, nil, map[string]any{"project_path": "someone/else"})},
+			{"untrusted-signing-key", "bao-wrapper-integration", s.jwt(t, otherKey, nil)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				c := jwtScenario(t)
+				c.env["BAO_AUTH_PATH"] = "ci-jwt"
+				c.env["BAO_JWT_ROLE"] = tc.role
+				c.env["BAO_JWT_TOKEN"] = tc.token
+				c.finish(c.start(nil), 1)
+				assertAbsent(t, c.report)
+				assertContains(t, c.stderr.String(), "error: vault login failed: api: POST returned status")
+			})
+		}
+	})
+	t.Run("tls", func(t *testing.T) {
+		tlsScenario := func(t *testing.T) *scenario {
+			c := s.scenario(t)
+			c.env["BAO_ADDR"] = s.tlsAddr
+			c.env["SECRET_DB_PASSWORD"] = "kv://password@kv/integration/app"
+			return c
+		}
+		for _, variable := range []string{"BAO_CACERT", "VAULT_CACERT"} {
+			t.Run(variable, func(t *testing.T) {
+				c := tlsScenario(t)
+				c.env[variable] = s.caFile
+				c.spec = probe.Spec{
+					Env:    map[string]string{"DB_PASSWORD": password},
+					Absent: []string{variable, "BAO_ADDR"},
+					Stdout: "tls-password=${DB_PASSWORD}\n",
+				}
+				c.finish(c.start(nil), 0)
+				_ = c.reportData()
+				assertContains(t, c.stdout.String(), "tls-password=[MASKED]")
+			})
+		}
+		t.Run("untrusted-certificate", func(t *testing.T) {
+			c := tlsScenario(t)
+			c.finish(c.start(nil), 1)
+			assertAbsent(t, c.report)
+			assertContains(t, c.stderr.String(), "error: vault approle login failed: api: POST request failed")
+		})
+		t.Run("unrelated-ca", func(t *testing.T) {
+			c := tlsScenario(t)
+			unrelated, _ := newServerCertificate(t, c.dir)
+			c.env["BAO_CACERT"] = unrelated
+			c.finish(c.start(nil), 1)
+			assertAbsent(t, c.report)
+			assertContains(t, c.stderr.String(), "error: vault approle login failed: api: POST request failed")
+		})
+	})
+	// A login-issued token that expires while the child runs is rejected by a
+	// real server at cleanup; the child's success must stand.
+	t.Run("token-expires-during-child", func(t *testing.T) {
+		c := s.scenario(t)
+		c.env["BAO_APP_ID"] = shortTTLRoleID
+		c.env["BAO_APP_SECRET"] = shortTTLSecretID
+		c.env["SECRET_DB_PASSWORD"] = "kv://password@kv/integration/app"
+		c.spec = probe.Spec{Env: map[string]string{"DB_PASSWORD": password}, DelayMillis: 2500}
+		c.finish(c.start(nil), 0)
+		_ = c.reportData()
+		assertContains(t, c.stderr.String(), "warning: token revocation was rejected (HTTP 403)")
 	})
 	runSignalTests(t, s)
 }

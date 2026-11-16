@@ -430,6 +430,27 @@ To run tests with coverage:
 go test -cover ./...
 ```
 
+Tests that need a child process run the test binary itself as that child, so no external programs are required on any platform.
+
+### Fuzzing and benchmarks
+
+Fuzz targets cover secret-reference parsing, request-path validation, template rendering and the output masker. Their seed inputs run as part of `go test ./...`; CI additionally fuzzes each target briefly on Linux. To fuzz one target locally:
+
+```bash
+go test ./parser   -run '^$' -fuzz '^FuzzParseEnv$'    -fuzztime 30s
+go test ./api      -run '^$' -fuzz '^FuzzRequestPath$' -fuzztime 30s
+go test ./template -run '^$' -fuzz '^FuzzRender$'      -fuzztime 30s
+go test ./masker   -run '^$' -fuzz '^FuzzWriter$'      -fuzztime 30s
+```
+
+A failing input is written to `testdata/fuzz/<target>/` in the package; commit it together with the fix so it runs as a regression test.
+
+To measure masker throughput across secret counts, secret lengths and write sizes:
+
+```bash
+go test ./masker -run '^$' -bench Writer
+```
+
 ### Running integration tests
 
 The integration suite runs the compiled wrapper and a Go child helper against a
@@ -455,20 +476,27 @@ Renovate; neither is fetched as an unpinned value during CI.
 
 Each suite builds its own executables, selects a loopback port, and creates
 isolated storage. A static test-only auto-unseal key and shared declarative
-self-initialization mount KV v1/v2, seed secrets, and create read-only AppRoles
-in root and test namespaces; no root token or manual bootstrap is needed. Server and child processes have
+self-initialization mount KV v1/v2, seed secrets, create read-only AppRoles in
+root and test namespaces, and configure a JWT auth mount; no root token or
+manual bootstrap is needed. The server also listens on a second, TLS-only port
+with a certificate generated for the run, and the JWT mount verifies tokens
+against a signing key generated for the run, so no private key is committed. Server and child processes have
 bounded lifetimes, temporary resources are cleaned up, and server logs are
 printed on failures. Independent invocations can run concurrently.
 
-The scenarios cover authentication, namespace selection through `BAO_NAMESPACE`
-and `VAULT_NAMESPACE` (including BAO precedence), KV engines, environment and
-file delivery, template masking, credential stripping, argument/stdin forwarding, Unicode and
-space-containing paths, failure handling, cleanup, and token revocation. Unix
-also checks file/directory permissions and SIGINT/SIGTERM forwarding; Windows
-checks file access and cleanup under inherited ACLs. CI runs the suite on all
+The scenarios cover AppRole and JWT authentication (including rejected JWTs),
+TLS with `BAO_CACERT`/`VAULT_CACERT` and untrusted certificates, namespace
+selection through `BAO_NAMESPACE` and `VAULT_NAMESPACE` (including BAO
+precedence), KV engines, environment and file delivery, template masking,
+credential stripping, argument/stdin forwarding, Unicode and space-containing
+paths, failure handling, cleanup, token revocation, and a token that expires
+while the child runs. Unix also checks file/directory permissions,
+SIGINT/SIGTERM forwarding, repeated signals, and that output is forwarded while
+the child is still running; Windows checks file access and cleanup under
+inherited ACLs. CI runs the suite on all
 three operating systems for PRs, main pushes, and release tags, and requires the
-whole matrix before publishing a release. JWT and TLS integration fixtures are
-not yet included; transport faults remain covered by mock-server tests.
+whole matrix before publishing a release. GitHub Actions OIDC token retrieval
+and transport faults remain covered by mock-server tests.
 
 Docker Compose remains available as an optional **manual** fixture using the
 same initialization declarations:

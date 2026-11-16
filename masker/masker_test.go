@@ -2,8 +2,11 @@ package masker_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/philhartung/bao-wrapper/masker"
@@ -421,4 +424,146 @@ func FuzzWriter(f *testing.F) {
 			}
 		}
 	})
+}
+
+// failingWriter accepts a fixed number of writes and then fails.
+type failingWriter struct {
+	accept int
+	err    error
+	bytes.Buffer
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	if w.accept <= 0 {
+		return 0, w.err
+	}
+	w.accept--
+	return w.Buffer.Write(p)
+}
+
+// A destination failure must reach the caller so the process copying the
+// child's output stops instead of silently discarding it.
+func TestWriter_PropagatesDestinationErrors(t *testing.T) {
+	failure := errors.New("destination closed")
+
+	t.Run("write", func(t *testing.T) {
+		dst := &failingWriter{err: failure}
+		w := masker.New(dst, []string{"registered-secret"})
+		if n, err := w.Write([]byte("plain output\n")); !errors.Is(err, failure) || n != 0 {
+			t.Fatalf("Write() = %d, %v; want 0 and the destination error", n, err)
+		}
+	})
+	t.Run("write without secrets", func(t *testing.T) {
+		dst := &failingWriter{err: failure}
+		w := masker.New(dst, nil)
+		if _, err := w.Write([]byte("plain output\n")); !errors.Is(err, failure) {
+			t.Fatalf("Write() error = %v", err)
+		}
+	})
+	t.Run("flush", func(t *testing.T) {
+		dst := &failingWriter{accept: 1, err: failure}
+		w := masker.New(dst, []string{"registered-secret"})
+		if _, err := w.Write([]byte("value: registered-sec")); err != nil {
+			t.Fatalf("Write() error = %v", err)
+		}
+		if err := w.Flush(); !errors.Is(err, failure) {
+			t.Fatalf("Flush() error = %v, want the destination error", err)
+		}
+		if strings.Contains(dst.String(), "registered-sec") {
+			t.Fatalf("withheld bytes reached the destination: %q", dst.String())
+		}
+	})
+}
+
+func TestWriter_AddSecretIgnoresShortValues(t *testing.T) {
+	var buf bytes.Buffer
+	w := masker.New(&buf, nil)
+	w.AddSecret("abc")
+	w.AddSecret("")
+	w.AddSecret("long-enough")
+	_, _ = w.Write([]byte("abc long-enough abc"))
+	_ = w.Flush()
+	if got := buf.String(); got != "abc [MASKED] abc" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// Secrets are matched as bytes, so a multi-byte value is masked wherever the
+// writes happen to split it, including inside a rune.
+func TestWriter_MultiByteSecretSplitAtEveryByte(t *testing.T) {
+	const secret = "pässwörd-ключ-密码"
+	input := []byte("vor " + secret + " nach ünïcode\n")
+	for split := 1; split < len(input); split++ {
+		var buf bytes.Buffer
+		w := masker.New(&buf, []string{secret})
+		_, _ = w.Write(input[:split])
+		_, _ = w.Write(input[split:])
+		_ = w.Flush()
+		if got := buf.String(); got != "vor [MASKED] nach ünïcode\n" {
+			t.Fatalf("split at byte %d: got %q", split, got)
+		}
+	}
+}
+
+// Stdout and stderr use separate writers, but one writer may still be shared;
+// concurrent writes must neither race nor leak.
+func TestWriter_ConcurrentWrites(t *testing.T) {
+	const secret = "concurrent-secret-value"
+	const writers, lines = 8, 200
+	var buf bytes.Buffer
+	w := masker.New(&buf, []string{secret})
+
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < lines; j++ {
+				if _, err := fmt.Fprintf(w, "writer %d line %d: %s\n", i, j, secret); err != nil {
+					t.Errorf("Write error: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), secret) {
+		t.Fatal("secret leaked under concurrent writes")
+	}
+	if got := strings.Count(buf.String(), "[MASKED]\n"); got != writers*lines {
+		t.Fatalf("masked %d lines, want %d", got, writers*lines)
+	}
+}
+
+// BenchmarkWriter measures throughput across the dimensions that drive cost:
+// the number of registered secrets, their length, and the size of each write.
+func BenchmarkWriter(b *testing.B) {
+	line := "2026-11-16T12:00:00Z INFO compiling module foo/bar/baz ok\n"
+	block := []byte(strings.Repeat(line, 560))
+	for _, tc := range []struct {
+		secrets, length int
+		write           []byte
+	}{
+		{1, 32, block}, {10, 32, block}, {100, 32, block}, {1, 8192, block},
+		{1, 32, []byte(line)}, {1, 8192, []byte(line)}, {1, 1 << 20, []byte(line)},
+	} {
+		b.Run(fmt.Sprintf("secrets=%d/len=%d/write=%d", tc.secrets, tc.length, len(tc.write)), func(b *testing.B) {
+			secrets := make([]string, tc.secrets)
+			for i := range secrets {
+				// Deterministic values that never occur in the log line.
+				secrets[i] = strings.Repeat(fmt.Sprintf("#%03d~", i), tc.length/5+1)[:tc.length]
+			}
+			w := masker.New(io.Discard, secrets)
+			b.SetBytes(int64(len(tc.write)))
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := w.Write(tc.write); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }

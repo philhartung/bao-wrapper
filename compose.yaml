@@ -20,6 +20,14 @@ services:
       OPENBAO_STATIC_SEAL_KEY: 0123456789abcdef0123456789abcdef
       INTEGRATION_ROLE_ID: 11111111-2222-3333-4444-555555555555
       INTEGRATION_SECRET_ID: bao-wrapper-integration-secret-id
+      # Public half of a key whose private half was discarded: the JWT mount
+      # needs a verification key to initialize, and JWT login itself is
+      # exercised only by the native suite, which generates its own key.
+      INTEGRATION_JWT_PUBLIC_KEY: |
+        -----BEGIN PUBLIC KEY-----
+        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEOgMPo0EzYmx+NYB6m8pd9UeDwasD
+        FaWClsV8EXkmd+0tVTGh8wUAK/Q1YRQ2BhZnLNmGijBjUNTcLM9iReXbrQ==
+        -----END PUBLIC KEY-----
     ports:
       - "127.0.0.1:${OPENBAO_PORT:-8200}:8200"
     volumes:

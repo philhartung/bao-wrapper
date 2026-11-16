@@ -15,8 +15,6 @@ import (
 	"github.com/philhartung/bao-wrapper/parser"
 )
 
-const signalChildHelperEnv = "GO_WANT_BAO_WRAPPER_SIGNAL_CHILD"
-
 type countingRevoker struct {
 	calls   atomic.Int32
 	started chan struct{}
@@ -34,26 +32,33 @@ func (revoker *countingRevoker) RevokeToken() error {
 	return nil
 }
 
-func TestSignalChildHelper(t *testing.T) {
-	if os.Getenv(signalChildHelperEnv) != "1" {
-		return
+func init() {
+	helpers["signal"] = helperSignal
+	helpers["kill-self"] = func([]string) int {
+		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+		select {}
 	}
+}
+
+// helperSignal reports readiness, waits for SIGINT or SIGTERM, records it and
+// then stays alive until the test releases it.
+func helperSignal([]string) int {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigCh)
 	if err := os.WriteFile(os.Getenv("HELPER_SECRET_PATH_MARKER"), []byte(os.Getenv("HELPER_SECRET_FILE")), 0600); err != nil {
-		os.Exit(2)
+		return 2
 	}
 	if err := os.WriteFile(os.Getenv("HELPER_READY"), []byte("ready"), 0600); err != nil {
-		os.Exit(2)
+		return 2
 	}
 	<-sigCh
 	if err := os.WriteFile(os.Getenv("HELPER_INTERRUPTED"), []byte("interrupted"), 0600); err != nil {
-		os.Exit(2)
+		return 2
 	}
 	for {
 		if _, err := os.Stat(os.Getenv("HELPER_RELEASE")); err == nil {
-			return
+			return 0
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -65,7 +70,6 @@ func TestSignalRevokesAndUnlinksBeforeChildExit(t *testing.T) {
 	interruptedPath := filepath.Join(tempDir, "interrupted")
 	releasePath := filepath.Join(tempDir, "release")
 	secretPathMarker := filepath.Join(tempDir, "secret-path")
-	t.Setenv(signalChildHelperEnv, "1")
 	t.Setenv("HELPER_READY", readyPath)
 	t.Setenv("HELPER_INTERRUPTED", interruptedPath)
 	t.Setenv("HELPER_RELEASE", releasePath)
@@ -89,7 +93,7 @@ func TestSignalRevokesAndUnlinksBeforeChildExit(t *testing.T) {
 	resultCh := make(chan runResult, 1)
 	go func() {
 		code, err := runWithSignalChannel(
-			[]string{os.Args[0], "-test.run=^TestSignalChildHelper$"},
+			helperCommand("signal"),
 			[]SecretValue{{Ref: parser.SecretRef{Type: parser.TypeFile, EnvName: "HELPER_SECRET_FILE"}, Value: "secret"}},
 			revoker,
 			"SECRET_",
@@ -141,4 +145,21 @@ func waitForTestFile(t *testing.T, path string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", path)
+}
+
+// A child terminated by a signal has no exit code; the runner reports 1 and
+// still cleans up, as documented.
+func TestRunReportsOneWhenChildIsKilledBySignal(t *testing.T) {
+	temp := isolateTemp(t)
+	revoker := &recordingRevoker{}
+	code, err := Run(helperCommand("kill-self"), []SecretValue{
+		{Ref: parser.SecretRef{Type: parser.TypeFile, EnvName: "KILLED_FILE"}, Value: "value"},
+	}, revoker, "SECRET_")
+	if code != 1 || err != nil {
+		t.Fatalf("Run() = %d, %v; want 1, nil", code, err)
+	}
+	assertEmptyDir(t, temp)
+	if revoker.calls != 1 {
+		t.Errorf("revoker called %d times, want 1", revoker.calls)
+	}
 }
