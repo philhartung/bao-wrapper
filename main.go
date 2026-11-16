@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -242,7 +243,7 @@ func run(args []string) int {
 	// by default. RevokeToken supplies a fresh timeout context after signals.
 	var tokenRevoker runner.Revoker
 	if ownership != tokenAbsent && (revokePolicy == "always" || (revokePolicy == "auto" && ownership == tokenOwned)) {
-		revoker := &onceRevoker{revoke: client.RevokeToken}
+		revoker := &onceRevoker{revoke: func() error { return revokeToken(client.RevokeToken, os.Stderr) }}
 		tokenRevoker = revoker
 		defer func() { _ = revoker.RevokeToken() }()
 	}
@@ -289,6 +290,20 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "error:", err)
 	}
 	return exitCode
+}
+
+// revokeToken runs revoke and downgrades a rejected token to a warning. A job
+// that outlives its token's TTL must not fail after its command succeeded:
+// the server answers 403 for an expired or already revoked token, and there
+// is nothing left to clean up. The warning keeps a policy that denies
+// revoke-self visible without changing the exit status.
+func revokeToken(revoke func() error, warnings io.Writer) error {
+	err := revoke()
+	if errors.Is(err, api.ErrTokenRejected) {
+		_, _ = fmt.Fprintln(warnings, "warning: token revocation was rejected (HTTP 403); the token has most likely expired or was already revoked")
+		return nil
+	}
+	return err
 }
 
 func printUsage() {

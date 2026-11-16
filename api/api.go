@@ -39,6 +39,25 @@ func (e *responseTooLargeError) Error() string {
 	return fmt.Sprintf("api: response body exceeds %d-byte limit", e.limit)
 }
 
+// ErrTokenRejected reports that OpenBao/Vault answered a token revocation with
+// HTTP 403. Both servers return 403 for a token that has expired or has
+// already been revoked, so there is usually nothing left to clean up. A token
+// whose policies deny auth/token/revoke-self is rejected the same way and
+// stays valid until it expires, which is why this is reported to the caller
+// rather than silently treated as success.
+var ErrTokenRejected = errors.New("api: token revocation rejected with status 403")
+
+// statusError is returned for responses outside the 2xx range. It carries the
+// status code only; response bodies are never included in errors.
+type statusError struct {
+	method string
+	code   int
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("api: %s returned status %d", e.method, e.code)
+}
+
 // Client is a minimal Vault/OpenBao REST client.
 type Client struct {
 	addr             string
@@ -316,11 +335,17 @@ func validateSecretPath(secretPath string, kvVersion int) error {
 
 // RevokeToken revokes the stored client token using an independent, bounded
 // context. The main context may be cancelled before or during cleanup when
-// the CLI and runner receive a shutdown signal independently.
+// the CLI and runner receive a shutdown signal independently. A 403 response
+// is returned as ErrTokenRejected so callers can distinguish a token that is
+// already unusable from a cleanup that could not be attempted.
 func (c *Client) RevokeToken() error {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 	_, err := c.doWithTransientRetries(ctx, http.MethodPost, "/v1/auth/token/revoke-self", nil)
+	var status *statusError
+	if errors.As(err, &status) && status.code == http.StatusForbidden {
+		return ErrTokenRejected
+	}
 	return err
 }
 
@@ -403,7 +428,7 @@ func (c *Client) doWithContext(ctx context.Context, method, path string, body []
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("api: %s returned status %d", method, res.StatusCode)
+		return nil, &statusError{method: method, code: res.StatusCode}
 	}
 
 	return resBody, nil

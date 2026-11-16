@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -19,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/philhartung/bao-wrapper/api"
 )
 
 const successfulRunChildHelperEnv = "GO_WANT_BAO_WRAPPER_SUCCESSFUL_RUN_CHILD"
@@ -604,6 +608,70 @@ func TestRunBaoToken_RevokeFailureReturnsNonzero(t *testing.T) {
 	}
 	if revokeCalls != 1 {
 		t.Fatalf("expected one token revocation attempt, got %d", revokeCalls)
+	}
+}
+
+// A job that outlives its token's TTL gets HTTP 403 from revoke-self. The
+// command already succeeded and nothing is left to revoke, so the exit status
+// must stay 0 and the condition must surface as a warning.
+func TestRunBaoToken_RejectedRevocationKeepsSuccessfulExit(t *testing.T) {
+	revokeCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/token/revoke-self" {
+			http.NotFound(w, r)
+			return
+		}
+		revokeCalls++
+		http.Error(w, `{"errors":["permission denied"]}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	t.Setenv("BAO_ADDR", srv.URL)
+	t.Setenv("VAULT_ADDR", "")
+	t.Setenv("BAO_TOKEN", "expired-token")
+	t.Setenv("VAULT_TOKEN", "")
+	t.Setenv("BAO_JWT_ROLE", "")
+	t.Setenv("BAO_JWT_TOKEN", "")
+	t.Setenv("BAO_APP_ID", "")
+	t.Setenv("BAO_APP_SECRET", "")
+	t.Setenv("BAO_NAMESPACE", "")
+	t.Setenv("BAO_CACERT", "")
+	t.Setenv("VAULT_CACERT", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+	t.Setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+	t.Setenv(successfulRunChildHelperEnv, "1")
+
+	code := run([]string{
+		"run", "--revoke-token=always", "--secret-prefix", "TEST_CLEANUP_SECRET_", "--",
+		os.Args[0], "-test.run=^TestSuccessfulRunChildHelper$",
+	})
+	if code != 0 {
+		t.Fatalf("expected exit code 0 when the token is already rejected, got %d", code)
+	}
+	if revokeCalls != 1 {
+		t.Fatalf("expected one token revocation attempt, got %d", revokeCalls)
+	}
+}
+
+func TestRevokeToken_WarnsOnlyForRejectedToken(t *testing.T) {
+	var warnings bytes.Buffer
+	if err := revokeToken(func() error { return api.ErrTokenRejected }, &warnings); err != nil {
+		t.Fatalf("rejected token must not be a cleanup failure: %v", err)
+	}
+	if !strings.Contains(warnings.String(), "warning: token revocation was rejected (HTTP 403)") {
+		t.Fatalf("missing warning, got %q", warnings.String())
+	}
+
+	warnings.Reset()
+	failure := errors.New("api: POST returned status 500")
+	if err := revokeToken(func() error { return failure }, &warnings); !errors.Is(err, failure) {
+		t.Fatalf("other failures must be returned, got %v", err)
+	}
+	if err := revokeToken(func() error { return nil }, &warnings); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if warnings.Len() != 0 {
+		t.Fatalf("unexpected warning: %q", warnings.String())
 	}
 }
 

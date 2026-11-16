@@ -134,6 +134,20 @@ func TestIntegration(t *testing.T) {
 		assertContains(t, c.stderr.String(), "runner: start process:")
 		s.assertToken(t, token, http.StatusOK)
 	})
+	// OpenBao answers revoke-self with 403 once a token is no longer valid, as
+	// happens when a job outlives its token's TTL.
+	t.Run("already-invalid-token-at-cleanup", func(t *testing.T) {
+		c := s.scenario(t)
+		token := s.token(t)
+		if status, _, err := s.request(http.MethodPost, "/v1/auth/token/revoke-self", token, nil); err != nil || status != http.StatusNoContent {
+			t.Fatalf("revoke fixture token: status=%d error=%v", status, err)
+		}
+		s.assertToken(t, token, http.StatusForbidden)
+		c.env["BAO_TOKEN"] = token
+		c.finish(c.start([]string{"--revoke-token=always"}), 0)
+		_ = c.reportData()
+		assertContains(t, c.stderr.String(), "warning: token revocation was rejected (HTTP 403)")
+	})
 	t.Run("arguments-stdin-and-borrowed-token", func(t *testing.T) {
 		c := s.scenario(t)
 		token := s.token(t)
