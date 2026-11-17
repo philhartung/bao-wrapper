@@ -2,10 +2,13 @@ package template_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/philhartung/bao-wrapper/masker"
 	"github.com/philhartung/bao-wrapper/parser"
@@ -57,7 +60,7 @@ func TestRender_BasicTemplate(t *testing.T) {
 		Type:   parser.TypeFile,
 	}
 
-	result, err := tmpl.Render(ref, reader)
+	result, err := tmpl.Render(context.Background(), ref, reader)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -89,7 +92,7 @@ func TestRender_InvalidInnerEngine(t *testing.T) {
 
 	ref := parser.SecretRef{Engine: "kv", Path: "cfg", Field: "tpl"}
 
-	_, err := tmpl.Render(ref, reader)
+	_, err := tmpl.Render(context.Background(), ref, reader)
 	if err == nil {
 		t.Fatal("expected error for disallowed engine")
 	}
@@ -105,7 +108,7 @@ func TestRender_InnerTypeRejected(t *testing.T) {
 
 	ref := parser.SecretRef{Engine: "kv", Path: "cfg", Field: "tpl"}
 
-	_, err := tmpl.Render(ref, reader)
+	_, err := tmpl.Render(context.Background(), ref, reader)
 	if err == nil {
 		t.Fatal("expected error for type in template secret")
 	}
@@ -121,7 +124,7 @@ func TestRender_InnerQueryRejected(t *testing.T) {
 
 	ref := parser.SecretRef{Engine: "kv", Path: "cfg", Field: "tpl"}
 
-	_, err := tmpl.Render(ref, reader)
+	_, err := tmpl.Render(context.Background(), ref, reader)
 	if err == nil {
 		t.Fatal("expected error for query args in template secret")
 	}
@@ -141,7 +144,7 @@ func TestRender_KVVersionForEngine(t *testing.T) {
 
 	ref := parser.SecretRef{Engine: "kv", Path: "cfg", Field: "tpl"}
 
-	result, err := tmpl.Render(ref, reader)
+	result, err := tmpl.Render(context.Background(), ref, reader)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -163,7 +166,7 @@ func TestRender_FetchErrorDoesNotExposeCause(t *testing.T) {
 	// The reader's error contains the path; Render must not expose it, even
 	// through unwrapping or detailed formatting of the returned error.
 	ref := parser.SecretRef{Engine: "template", Path: "source-credential-91ba3c"}
-	result, err := tmpl.Render(ref, &fakeReader{})
+	result, err := tmpl.Render(context.Background(), ref, &fakeReader{})
 	if err == nil {
 		t.Fatal("expected template fetch to fail")
 	}
@@ -184,7 +187,7 @@ func render(t *testing.T, template string, secrets map[string]string) (*tmpl.Res
 	for key, value := range secrets {
 		all[key] = value
 	}
-	return tmpl.Render(parser.SecretRef{Engine: "template", Path: "kv/config", Field: "tpl"}, &fakeReader{secrets: all})
+	return tmpl.Render(context.Background(), parser.SecretRef{Engine: "template", Path: "kv/config", Field: "tpl"}, &fakeReader{secrets: all})
 }
 
 // Control structures work, and every lookup is collected for masking,
@@ -267,5 +270,72 @@ func TestRender_ErrorsCarryOnlySafeDetails(t *testing.T) {
 				t.Error("error wraps its cause, which may contain template text or values")
 			}
 		})
+	}
+}
+
+// countingReader serves a template and counts lookups made by the helper.
+type countingReader struct {
+	template string
+	lookups  atomic.Int32
+	onLookup func()
+}
+
+func (r *countingReader) ReadSecret(path, _ string, _ int) (string, error) {
+	if path == "kv/config" {
+		return r.template, nil
+	}
+	r.lookups.Add(1)
+	if r.onLookup != nil {
+		r.onLookup()
+	}
+	return "inner-value", nil
+}
+
+var cancellableRef = parser.SecretRef{Engine: "template", Path: "kv/config", Field: "tpl"}
+
+// A cancelled context must stop a render before it fetches anything.
+func TestRender_CancelledBeforeStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reader := &countingReader{template: `{{ secret "kv://password@kv/db" }}`}
+	if _, err := tmpl.Render(ctx, cancellableRef, reader); !errors.Is(err, tmpl.ErrInterrupted) {
+		t.Fatalf("Render() error = %v, want ErrInterrupted", err)
+	}
+	if lookups := reader.lookups.Load(); lookups != 0 {
+		t.Errorf("helper performed %d lookups after cancellation", lookups)
+	}
+}
+
+// text/template cannot interrupt a loop that neither calls a function nor
+// fails, so Render must return on cancellation without waiting for it.
+func TestRender_CancelledDuringLongExecution(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &countingReader{template: `{{ range 2000000000 }}{{ end }}done`}
+	time.AfterFunc(50*time.Millisecond, cancel)
+	start := time.Now()
+	_, err := tmpl.Render(ctx, cancellableRef, reader)
+	if !errors.Is(err, tmpl.ErrInterrupted) {
+		t.Fatalf("Render() error = %v, want ErrInterrupted", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Render() returned after %v, want prompt cancellation", elapsed)
+	}
+}
+
+// Once the context is cancelled the helper must not read further secrets,
+// and the render must not report success.
+func TestRender_NoLookupsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &countingReader{
+		template: `{{ secret "kv://a@kv/db" }}{{ secret "kv://b@kv/db" }}{{ secret "kv://c@kv/db" }}`,
+		onLookup: cancel,
+	}
+	if _, err := tmpl.Render(ctx, cancellableRef, reader); !errors.Is(err, tmpl.ErrInterrupted) {
+		t.Fatalf("Render() error = %v, want ErrInterrupted", err)
+	}
+	// Allow an abandoned execution to reach the next helper call.
+	time.Sleep(50 * time.Millisecond)
+	if lookups := reader.lookups.Load(); lookups != 1 {
+		t.Errorf("helper performed %d lookups, want 1", lookups)
 	}
 }

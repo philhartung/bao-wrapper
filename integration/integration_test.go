@@ -133,7 +133,8 @@ func TestIntegration(t *testing.T) {
 		token := s.token(t)
 		c.env["BAO_TOKEN"] = token
 		c.env["SECRET_CERT_FILE"] = "kv://certificate:file@kv/integration/app"
-		c.finish(c.start(nil, filepath.Join(c.dir, "does-not-exist")), 1)
+		// A missing command is reported as a shell would report it.
+		c.finish(c.start(nil, filepath.Join(c.dir, "does-not-exist")), 127)
 		assertAbsent(t, c.report)
 		assertContains(t, c.stderr.String(), "runner: start process:")
 		s.assertToken(t, token, http.StatusOK)

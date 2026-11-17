@@ -84,6 +84,10 @@ func TestTokenPolicyLifecycle(t *testing.T) {
 					if outcome == "child-failure" && source != "failed-login" {
 						wantCode = 23
 					}
+					// A missing command is reported as a shell would report it.
+					if outcome == "start-failure" && source != "failed-login" {
+						wantCode = 127
+					}
 					if got := run(args); got != wantCode {
 						t.Errorf("exit=%d, want %d", got, wantCode)
 					}

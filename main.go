@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -62,11 +63,84 @@ func (revoker *onceRevoker) RevokeToken() error {
 	return revoker.err
 }
 
+// shutdownSignalBuffer bounds the signals queued for the context watcher and
+// for the runner. Signals beyond it are dropped, which loses nothing: the
+// first one already started the shutdown.
+const shutdownSignalBuffer = 8
+
+// shutdown turns the process's single signal registration into a context
+// for the fetch phase and a channel for the runner. Using one registration
+// for both closes the gap in which a signal could reach neither.
+type shutdown struct {
+	ctx      context.Context
+	cancel   context.CancelFunc
+	signals  chan os.Signal
+	first    atomic.Int64
+	done     chan struct{}
+	stopOnce sync.Once
+}
+
+// newShutdown watches raw until stop is called. For each signal it records
+// the first one, cancels the context, and queues the signal for the runner.
+// Recording before cancelling means a cancelled context always has a known
+// signal.
+func newShutdown(raw <-chan os.Signal) *shutdown {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &shutdown{
+		ctx:     ctx,
+		cancel:  cancel,
+		signals: make(chan os.Signal, shutdownSignalBuffer),
+		done:    make(chan struct{}),
+	}
+	go func() {
+		for {
+			select {
+			case sig := <-raw:
+				if number, ok := sig.(syscall.Signal); ok {
+					s.first.CompareAndSwap(0, int64(number))
+				}
+				cancel()
+				select {
+				case s.signals <- sig:
+				default:
+				}
+			case <-s.done:
+				return
+			}
+		}
+	}()
+	return s
+}
+
+// signal returns the first shutdown signal received, if any.
+func (s *shutdown) signal() (os.Signal, bool) {
+	number := s.first.Load()
+	return syscall.Signal(number), number != 0
+}
+
+// stop ends the watcher and releases the context.
+func (s *shutdown) stop() {
+	s.stopOnce.Do(func() {
+		close(s.done)
+		s.cancel()
+	})
+}
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
 func run(args []string) int {
+	raw := make(chan os.Signal, shutdownSignalBuffer)
+	signal.Notify(raw, runner.ShutdownSignals()...)
+	defer signal.Stop(raw)
+	return runWithSignals(args, raw)
+}
+
+// runWithSignals is run with an injectable signal source. A shutdown signal
+// received before the child starts prevents the start and is reported as 128
+// plus the signal number; later signals are forwarded to the child.
+func runWithSignals(args []string, raw <-chan os.Signal) (exitCode int) {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printUsage()
 		return 0
@@ -162,10 +236,17 @@ func run(args []string) int {
 		return 1
 	}
 
-	// Set up a main context that is cancelled on SIGINT/SIGTERM so that
-	// in-flight HTTP requests are aborted promptly on shutdown.
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	// The context is cancelled on the first shutdown signal so that in-flight
+	// HTTP requests and template rendering are aborted promptly.
+	interrupt := newShutdown(raw)
+	defer interrupt.stop()
+	ctx := interrupt.ctx
+	childHandedOver := false
+	defer func() {
+		if sig, interrupted := interrupt.signal(); interrupted && !childHandedOver {
+			exitCode = runner.SignalExitCode(sig)
+		}
+	}()
 
 	// Read configuration from environment.
 	vaultAddr := getEnvWithFallback("BAO_ADDR", "VAULT_ADDR")
@@ -265,7 +346,7 @@ func run(args []string) int {
 	for _, ref := range refs {
 		if ref.Engine == "template" {
 			// Template engine: render the template and collect inner secrets.
-			result, err := tmpl.Render(ref, client)
+			result, err := tmpl.Render(ctx, ref, client)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "error: render template", ref.EnvName+":", err)
 				return 1
@@ -290,7 +371,10 @@ func run(args []string) int {
 
 	// The shared idempotent revoker lets runner revoke immediately on a signal,
 	// while this function's defer still covers failures before child startup.
-	exitCode, err := runner.Run(cmdArgs, secretValues, tokenRevoker, secretPrefix)
+	// From here the runner owns signal handling: it refuses to start the child
+	// when a signal is already queued and forwards every later one.
+	childHandedOver = true
+	exitCode, err = runner.Run(cmdArgs, secretValues, tokenRevoker, secretPrefix, interrupt.signals)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 	}

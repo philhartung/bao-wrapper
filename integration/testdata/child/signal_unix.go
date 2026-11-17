@@ -12,7 +12,7 @@ import (
 
 func waitForSignal(report string) error {
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
 	if err := os.WriteFile(report+".ready", []byte("ready"), 0600); err != nil { // #nosec G703 -- readiness marker uses the harness-supplied temporary report path
 		return err

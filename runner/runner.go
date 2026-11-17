@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -35,24 +36,52 @@ type SecretValue struct {
 	Value string
 }
 
+// Exit codes reported for conditions that have no child exit code, following
+// shell conventions.
+const (
+	exitCannotExecute   = 126
+	exitCommandNotFound = 127
+	exitSignalBase      = 128
+)
+
+// ShutdownSignals returns the signals that start cleanup and are forwarded to
+// the child: SIGINT, SIGTERM and SIGHUP. SIGHUP is left out when the process
+// was started with it ignored (for example under nohup), because registering
+// a handler would re-enable a signal the caller asked to be ignored.
+func ShutdownSignals() []os.Signal {
+	signals := []os.Signal{syscall.SIGINT, syscall.SIGTERM}
+	if !signal.Ignored(syscall.SIGHUP) {
+		signals = append(signals, syscall.SIGHUP)
+	}
+	return signals
+}
+
+// SignalExitCode returns the shell-style exit code for termination by sig:
+// 128 plus the signal number.
+func SignalExitCode(sig os.Signal) int {
+	if number, ok := sig.(syscall.Signal); ok && number > 0 {
+		return exitSignalBase + int(number)
+	}
+	return 1
+}
+
 // Run executes args[0] with args[1:] as arguments. It:
 //   - injects resolved secrets into the child environment (env or file)
 //   - masks all secret values in stdout/stderr in real-time
 //   - revokes the Vault token when a revoker is supplied and removes temp files on exit or signal
 //   - drains output for up to one second after the direct child exits
-//   - returns the child's exit code, or a nonzero code when cleanup fails or
+//   - returns the child's exit code, 128 plus the signal number when the
+//     child was terminated by a signal, 127 or 126 when the command was not
+//     found or could not be executed, or a nonzero code when cleanup fails or
 //     output draining times out after the child succeeds
+//
+// sigCh delivers the shutdown signals. The caller owns the registration, so
+// that a signal received before Run is still pending here: Run does not start
+// the child when a signal is already waiting, and forwards every later one.
 //
 // secretPrefix is the env-var prefix used to identify secret variables (e.g.
 // "SECRET_"). It is stripped from the child environment to prevent leakage.
-func Run(args []string, secrets []SecretValue, revoker Revoker, secretPrefix string) (int, error) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-	return runWithSignalChannel(args, secrets, revoker, secretPrefix, sigCh)
-}
-
-func runWithSignalChannel(args []string, secrets []SecretValue, revoker Revoker, secretPrefix string, sigCh <-chan os.Signal) (int, error) {
+func Run(args []string, secrets []SecretValue, revoker Revoker, secretPrefix string, sigCh <-chan os.Signal) (int, error) {
 	return runWithCleanup(args, secrets, revoker, secretPrefix, sigCh, os.RemoveAll)
 }
 
@@ -151,12 +180,23 @@ func runWithCleanup(
 	cmd.Stdin = os.Stdin
 	cmd.WaitDelay = outputDrainTimeout
 
+	// A signal that arrived before this point must prevent the child from
+	// starting. One that arrives later stays buffered in sigCh and is forwarded
+	// by the wait loop below, so no shutdown signal is lost in between.
+	select {
+	case sig := <-sigCh:
+		cleanupErr := finishCleanup()
+		return SignalExitCode(sig), errors.Join(
+			fmt.Errorf("runner: interrupted by %v before the command started", sig), cleanupErr)
+	default:
+	}
+
 	// Revoke the token and unlink temporary secrets as soon as a shutdown signal
 	// arrives. Process-tree enforcement is deliberately left to the CI/container
 	// runtime; the runner forwards signals only to its direct child.
 	if err := cmd.Start(); err != nil {
 		_ = finishCleanup()
-		return 1, fmt.Errorf("runner: start process: %w", err)
+		return startFailureExitCode(err), fmt.Errorf("runner: start process: %w", err)
 	}
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- cmd.Wait() }()
@@ -182,10 +222,7 @@ waitLoop:
 
 	cleanupErr := finishCleanup()
 
-	exitCode := cmd.ProcessState.ExitCode()
-	if exitCode < 0 {
-		exitCode = 1
-	}
+	exitCode := exitStatus(cmd.ProcessState)
 	var exitErr *exec.ExitError
 	if waitErr != nil && !errors.As(waitErr, &exitErr) {
 		return 1, errors.Join(fmt.Errorf("runner: wait for process: %w", waitErr), signalErr, cleanupErr)
@@ -194,6 +231,28 @@ waitLoop:
 		exitCode = 1
 	}
 	return exitCode, errors.Join(signalErr, cleanupErr)
+}
+
+// startFailureExitCode maps a failure to start the child to the shell
+// convention: 127 when the command does not exist, 126 when it exists but
+// cannot be executed.
+func startFailureExitCode(err error) int {
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+		return exitCommandNotFound
+	}
+	return exitCannotExecute
+}
+
+// exitStatus returns the child's exit code, or 128 plus the signal number
+// when a signal terminated it. Windows never reports signal termination.
+func exitStatus(state *os.ProcessState) int {
+	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return SignalExitCode(status.Signal())
+	}
+	if code := state.ExitCode(); code >= 0 {
+		return code
+	}
+	return 1
 }
 
 // valuesForMasking selects plaintext values that should be registered with

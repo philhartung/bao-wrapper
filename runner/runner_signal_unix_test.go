@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -40,11 +42,11 @@ func init() {
 	}
 }
 
-// helperSignal reports readiness, waits for SIGINT or SIGTERM, records it and
+// helperSignal reports readiness, waits for a shutdown signal, records it and
 // then stays alive until the test releases it.
 func helperSignal([]string) int {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	defer signal.Stop(sigCh)
 	if err := os.WriteFile(os.Getenv("HELPER_SECRET_PATH_MARKER"), []byte(os.Getenv("HELPER_SECRET_FILE")), 0600); err != nil {
 		return 2
@@ -52,8 +54,8 @@ func helperSignal([]string) int {
 	if err := os.WriteFile(os.Getenv("HELPER_READY"), []byte("ready"), 0600); err != nil {
 		return 2
 	}
-	<-sigCh
-	if err := os.WriteFile(os.Getenv("HELPER_INTERRUPTED"), []byte("interrupted"), 0600); err != nil {
+	sig := <-sigCh
+	if err := os.WriteFile(os.Getenv("HELPER_INTERRUPTED"), []byte(sig.String()), 0600); err != nil {
 		return 2
 	}
 	for {
@@ -65,6 +67,12 @@ func helperSignal([]string) int {
 }
 
 func TestSignalRevokesAndUnlinksBeforeChildExit(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP} {
+		t.Run(sig.String(), func(t *testing.T) { testSignalRevokesAndUnlinksBeforeChildExit(t, sig) })
+	}
+}
+
+func testSignalRevokesAndUnlinksBeforeChildExit(t *testing.T, sig syscall.Signal) {
 	tempDir := t.TempDir()
 	readyPath := filepath.Join(tempDir, "ready")
 	interruptedPath := filepath.Join(tempDir, "interrupted")
@@ -92,7 +100,7 @@ func TestSignalRevokesAndUnlinksBeforeChildExit(t *testing.T) {
 	}
 	resultCh := make(chan runResult, 1)
 	go func() {
-		code, err := runWithSignalChannel(
+		code, err := Run(
 			helperCommand("signal"),
 			[]SecretValue{{Ref: parser.SecretRef{Type: parser.TypeFile, EnvName: "HELPER_SECRET_FILE"}, Value: "secret"}},
 			revoker,
@@ -104,7 +112,7 @@ func TestSignalRevokesAndUnlinksBeforeChildExit(t *testing.T) {
 	defer func() { _ = os.WriteFile(releasePath, []byte("release"), 0600) }()
 
 	waitForTestFile(t, readyPath)
-	sigCh <- syscall.SIGTERM
+	sigCh <- sig
 	select {
 	case <-revokeStarted:
 	case <-time.After(time.Second):
@@ -112,6 +120,16 @@ func TestSignalRevokesAndUnlinksBeforeChildExit(t *testing.T) {
 	}
 	// Signal forwarding must not wait for the deliberately blocked revoker.
 	waitForTestFile(t, interruptedPath)
+	// The marker can exist before the child has written the signal name.
+	var forwarded []byte
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if forwarded, _ = os.ReadFile(interruptedPath); string(forwarded) == sig.String() {
+			break
+		}
+	}
+	if string(forwarded) != sig.String() {
+		t.Fatalf("child received %q, want %q", forwarded, sig)
+	}
 	if calls := revoker.calls.Load(); calls != 1 {
 		t.Fatalf("expected immediate single revocation, got %d calls", calls)
 	}
@@ -135,6 +153,50 @@ func TestSignalRevokesAndUnlinksBeforeChildExit(t *testing.T) {
 	}
 }
 
+// A signal that is already pending when Run is called must prevent the child
+// from starting, while secret files are still removed and the token revoked.
+func TestPendingSignalPreventsChildStart(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP} {
+		t.Run(sig.String(), func(t *testing.T) {
+			temp := isolateTemp(t)
+			started := filepath.Join(t.TempDir(), "started")
+			revoker := &recordingRevoker{}
+			sigCh := make(chan os.Signal, 1)
+			sigCh <- sig
+
+			code, err := Run(helperCommand("env", started), []SecretValue{
+				{Ref: parser.SecretRef{Type: parser.TypeFile, EnvName: "PENDING_FILE"}, Value: "value"},
+			}, revoker, "SECRET_", sigCh)
+
+			if want := 128 + int(sig); code != want {
+				t.Errorf("Run() exit code = %d, want %d", code, want)
+			}
+			if err == nil || !strings.Contains(err.Error(), "before the command started") {
+				t.Errorf("Run() error = %v, want an interruption error", err)
+			}
+			if _, statErr := os.Stat(started); !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("child was started despite the pending signal: %v", statErr)
+			}
+			assertEmptyDir(t, temp)
+			if revoker.calls != 1 {
+				t.Errorf("revoker called %d times, want 1", revoker.calls)
+			}
+		})
+	}
+}
+
+func TestShutdownSignalsIncludeHangup(t *testing.T) {
+	if signal.Ignored(syscall.SIGHUP) {
+		t.Skip("SIGHUP is ignored in this environment")
+	}
+	signals := ShutdownSignals()
+	for _, want := range []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
+		if !slices.Contains(signals, want) {
+			t.Errorf("ShutdownSignals() = %v, missing %v", signals, want)
+		}
+	}
+}
+
 func waitForTestFile(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -147,16 +209,34 @@ func waitForTestFile(t *testing.T, path string) {
 	t.Fatalf("timed out waiting for %s", path)
 }
 
-// A child terminated by a signal has no exit code; the runner reports 1 and
-// still cleans up, as documented.
-func TestRunReportsOneWhenChildIsKilledBySignal(t *testing.T) {
+// A child terminated by a signal reports 128 plus the signal number, as a
+// shell does, and the runner still cleans up.
+func TestRunReportsSignalExitCodeWhenChildIsKilled(t *testing.T) {
 	temp := isolateTemp(t)
 	revoker := &recordingRevoker{}
 	code, err := Run(helperCommand("kill-self"), []SecretValue{
 		{Ref: parser.SecretRef{Type: parser.TypeFile, EnvName: "KILLED_FILE"}, Value: "value"},
-	}, revoker, "SECRET_")
-	if code != 1 || err != nil {
-		t.Fatalf("Run() = %d, %v; want 1, nil", code, err)
+	}, revoker, "SECRET_", nil)
+	if want := 128 + int(syscall.SIGKILL); code != want || err != nil {
+		t.Fatalf("Run() = %d, %v; want %d, nil", code, err, want)
+	}
+	assertEmptyDir(t, temp)
+	if revoker.calls != 1 {
+		t.Errorf("revoker called %d times, want 1", revoker.calls)
+	}
+}
+
+// A file that exists but cannot be executed reports 126, as a shell does.
+func TestRunReportsCannotExecute(t *testing.T) {
+	temp := isolateTemp(t)
+	script := filepath.Join(t.TempDir(), "not-executable")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	revoker := &recordingRevoker{}
+	code, err := Run([]string{script}, nil, revoker, "SECRET_", nil)
+	if code != 126 || err == nil || !strings.Contains(err.Error(), "start process") {
+		t.Fatalf("Run() = %d, %v; want 126 and a start failure", code, err)
 	}
 	assertEmptyDir(t, temp)
 	if revoker.calls != 1 {
