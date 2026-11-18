@@ -25,6 +25,7 @@ func TestRunReturnsNonzeroWhenRevocationFailsAfterSuccessfulChild(t *testing.T) 
 		nil,
 		failingRevoker{err: revokeErr},
 		"SECRET_",
+		nil,
 	)
 
 	if exitCode != 1 {

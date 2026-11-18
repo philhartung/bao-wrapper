@@ -8,6 +8,7 @@ package template
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"regexp"
 	"text/template"
@@ -42,6 +43,10 @@ func renderError(stage string, err error) error {
 	return errors.New(message)
 }
 
+// ErrInterrupted is returned when the context is cancelled before or while a
+// template is rendered.
+var ErrInterrupted = errors.New("template: interrupted")
+
 // SecretReader abstracts fetching a secret value (implemented by api.Client).
 type SecretReader interface {
 	ReadSecret(path, field string, kvVersion int) (string, error)
@@ -66,7 +71,15 @@ type Result struct {
 // {{ secret }} function IS included in Result.InnerSecrets.
 // Errors expose only the stage, numeric source location when available, and
 // safe helper failure categories, so callers can log them before masking exists.
-func Render(ref parser.SecretRef, reader SecretReader) (*Result, error) {
+//
+// Cancelling ctx stops the render: Render returns ErrInterrupted promptly and
+// the secret helper performs no further lookups. text/template cannot stop a
+// running template that neither calls a function nor fails, so the execution
+// goroutine is abandoned in that case; the caller is expected to exit.
+func Render(ctx context.Context, ref parser.SecretRef, reader SecretReader) (*Result, error) {
+	if ctx.Err() != nil {
+		return nil, ErrInterrupted
+	}
 	// Fetch the raw template content from the KV path.
 	tplContent, err := reader.ReadSecret(ref.Path, ref.Field, parser.KVVersionForEngine(ref.Engine))
 	if err != nil {
@@ -78,6 +91,10 @@ func Render(ref parser.SecretRef, reader SecretReader) (*Result, error) {
 	// Build the secret helper function.
 	funcMap := template.FuncMap{
 		"secret": func(raw string) (string, error) {
+			// Checked first so an abandoned execution reads no more secrets.
+			if ctx.Err() != nil {
+				return "", ErrInterrupted
+			}
 			inner, err := parser.ParseTemplateSecretURL(raw)
 			if err != nil {
 				return "", errSecretReference
@@ -96,9 +113,21 @@ func Render(ref parser.SecretRef, reader SecretReader) (*Result, error) {
 		return nil, renderError("parse", err)
 	}
 
+	// buf and innerSecrets belong to the execution goroutine until it reports
+	// on done; after cancellation they are never read again.
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, nil); err != nil {
-		return nil, renderError("execute", err)
+	done := make(chan error, 1)
+	go func() { done <- tmpl.Execute(&buf, nil) }()
+	select {
+	case err := <-done:
+		if ctx.Err() != nil {
+			return nil, ErrInterrupted
+		}
+		if err != nil {
+			return nil, renderError("execute", err)
+		}
+	case <-ctx.Done():
+		return nil, ErrInterrupted
 	}
 
 	return &Result{

@@ -15,7 +15,7 @@ import (
 
 func runSignalTests(t *testing.T, s *suite) {
 	for _, policy := range []string{"auto", "always", "never"} {
-		for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
+		for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
 			t.Run("signal-"+sig.String()+"-"+policy, func(t *testing.T) {
 				c := s.scenario(t)
 				token := s.token(t)

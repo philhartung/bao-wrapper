@@ -1,6 +1,7 @@
 package template_test
 
 import (
+	"context"
 	"regexp"
 	"strings"
 	"testing"
@@ -48,7 +49,7 @@ func FuzzRender(f *testing.F) {
 				t.Skip("looping and recursive templates are out of scope")
 			}
 		}
-		result, err := tmpl.Render(parser.SecretRef{Engine: "template", Path: "kv/fuzz-template", Field: "tpl"}, sentinelReader{template})
+		result, err := tmpl.Render(context.Background(), parser.SecretRef{Engine: "template", Path: "kv/fuzz-template", Field: "tpl"}, sentinelReader{template})
 		if err != nil {
 			if result != nil {
 				t.Fatalf("result returned together with an error")

@@ -38,7 +38,7 @@ func childEnv(t *testing.T, path string) map[string]string {
 func TestRunRequiresCommand(t *testing.T) {
 	temp := isolateTemp(t)
 	revoker := &recordingRevoker{}
-	code, err := Run(nil, []SecretValue{fileSecret("UNUSED", "value")}, revoker, "SECRET_")
+	code, err := Run(nil, []SecretValue{fileSecret("UNUSED", "value")}, revoker, "SECRET_", nil)
 	if code != 1 || err == nil || !strings.Contains(err.Error(), "no command specified") {
 		t.Fatalf("Run() = %d, %v", code, err)
 	}
@@ -61,7 +61,7 @@ func TestRunDeliversSecretsAndCleansUp(t *testing.T) {
 		envSecret("RUNNER_TEST_EMPTY", ""),
 		fileSecret("RUNNER_TEST_FILE", "file-contents"),
 		envSecret("", "masking-only-value"),
-	}, revoker, "SECRET_")
+	}, revoker, "SECRET_", nil)
 	if code != 0 || err != nil {
 		t.Fatalf("Run() = %d, %v", code, err)
 	}
@@ -101,22 +101,25 @@ func TestRunDeliversSecretsAndCleansUp(t *testing.T) {
 func TestRunCleansUpAfterStartupFailures(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	for _, tc := range []struct {
-		name    string
-		args    []string
-		secrets []SecretValue
-		want    string
+		name     string
+		args     []string
+		secrets  []SecretValue
+		want     string
+		wantCode int
 	}{
-		{"duplicate file name", helperCommand("exit"), []SecretValue{fileSecret("DUPLICATE", "first"), fileSecret("DUPLICATE", "second")}, "create secret file"},
-		{"name with separator", helperCommand("exit"), []SecretValue{fileSecret("FIRST", "first"), fileSecret("nested/NAME", "second")}, "create secret file"},
-		{"name escaping the directory", helperCommand("exit"), []SecretValue{fileSecret("../ESCAPED", "value")}, "create secret file"},
-		{"command not found", []string{missing}, []SecretValue{fileSecret("WRITTEN", "value")}, "start process"},
+		{"duplicate file name", helperCommand("exit"), []SecretValue{fileSecret("DUPLICATE", "first"), fileSecret("DUPLICATE", "second")}, "create secret file", 1},
+		{"name with separator", helperCommand("exit"), []SecretValue{fileSecret("FIRST", "first"), fileSecret("nested/NAME", "second")}, "create secret file", 1},
+		{"name escaping the directory", helperCommand("exit"), []SecretValue{fileSecret("../ESCAPED", "value")}, "create secret file", 1},
+		// A missing command reports 127, as a shell does.
+		{"command not found", []string{missing}, []SecretValue{fileSecret("WRITTEN", "value")}, "start process", 127},
+		{"command not found on PATH", []string{"bao-wrapper-no-such-command"}, []SecretValue{fileSecret("WRITTEN", "value")}, "start process", 127},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			temp := isolateTemp(t)
 			revoker := &recordingRevoker{}
-			code, err := Run(tc.args, tc.secrets, revoker, "SECRET_")
-			if code != 1 || err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("Run() = %d, %v; want exit 1 and %q", code, err, tc.want)
+			code, err := Run(tc.args, tc.secrets, revoker, "SECRET_", nil)
+			if code != tc.wantCode || err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Run() = %d, %v; want exit %d and %q", code, err, tc.wantCode, tc.want)
 			}
 			for _, secret := range tc.secrets {
 				if strings.Contains(err.Error(), secret.Value) {
@@ -135,7 +138,7 @@ func TestRunPreservesChildExitCode(t *testing.T) {
 	isolateTemp(t)
 	for _, want := range []int{0, 1, 3, 42, 125} {
 		revoker := &recordingRevoker{}
-		code, err := Run(helperCommand("exit", strconv.Itoa(want)), nil, revoker, "SECRET_")
+		code, err := Run(helperCommand("exit", strconv.Itoa(want)), nil, revoker, "SECRET_", nil)
 		if code != want || err != nil {
 			t.Errorf("Run() = %d, %v; want %d", code, err, want)
 		}
@@ -163,7 +166,7 @@ func TestRunMasksChildOutput(t *testing.T) {
 	stdout, stderr := captureStreams(t, func() {
 		code, err = Run(helperCommand("echo",
 			"token=registered-token-value pin=123 config: user=app password=inner-secret-value\n",
-			"cert=certificate-material\n"), secrets, nil, "SECRET_")
+			"cert=certificate-material\n"), secrets, nil, "SECRET_", nil)
 	})
 	if code != 0 || err != nil {
 		t.Fatalf("Run() = %d, %v", code, err)
